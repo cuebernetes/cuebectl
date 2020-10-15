@@ -1,4 +1,4 @@
-module github.com/cuebernetes/cuebectl
+module github.com/cuebernetes/kubectl-cue
 
 go 1.15
 

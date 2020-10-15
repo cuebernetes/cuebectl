@@ -17,6 +17,15 @@ TestNs: #Namespace & {
     metadata: generateName: "test-ns-"
 }
 
+NoGenNameServiceAccount: corev1.#ServiceAccount & {
+    apiVersion: "v1"
+    kind: "ServiceAccount"
+    metadata: {
+        name: "test"
+        namespace: "default"
+    }
+}
+
 TestServiceAccount: corev1.#ServiceAccount & {
     apiVersion: "v1"
     kind: "ServiceAccount"
