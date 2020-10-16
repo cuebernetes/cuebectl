@@ -1,4 +1,4 @@
-# kubectl-cue
+# cuebectl
 
 The future home of a kubectl plugin that can unify cue definitions with a cluster.
 
