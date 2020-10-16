@@ -13,18 +13,19 @@ import (
 	"k8s.io/client-go/dynamic"
 )
 
-func Do(client dynamic.Interface, mapper meta.RESTMapper) {
+func Do(client dynamic.Interface, mapper meta.RESTMapper, path string) error {
 	var r cue.Runtime
 
 	is := load.Instances([]string{"."}, &load.Config{
-		Dir: "example",
+		Dir: path,
 	})
+
 	var instance *cue.Instance
 	for _, i := range is {
 		if instance == nil {
 			i2, err := r.Build(i)
 			if err != nil {
-				panic(err)
+				return err
 			}
 			instance = i2
 		}
@@ -33,7 +34,7 @@ func Do(client dynamic.Interface, mapper meta.RESTMapper) {
 
 	itr, err := instance.Value().Fields()
 	if err != nil {
-		panic(err)
+		return err
 	}
 
 	created := map[string]struct{}{}
@@ -66,12 +67,13 @@ func Do(client dynamic.Interface, mapper meta.RESTMapper) {
 		if cont == false && rescan == true {
 			itr, err = instance.Value().Fields()
 			if err != nil {
-				panic(err)
+				return err
 			}
 			cont = itr.Next()
 			rescan = false
 		}
 	}
+	return nil
 }
 
 func ensure(client dynamic.Interface, mapper meta.RESTMapper, in cue.Value) (*unstructured.Unstructured, error) {
@@ -125,7 +127,6 @@ func ensure(client dynamic.Interface, mapper meta.RESTMapper, in cue.Value) (*un
 
 // returns a new instance with the value of in from the cluster by creating in
 func instanceFromCluster(in cue.Value, i *cue.Instance, client dynamic.Interface, mapper meta.RESTMapper) (*cue.Instance, error) {
-	// TODO: just return object instead of serializing in/out
 	out, err := ensure(client, mapper, in)
 	if err != nil {
 		return nil, err
