@@ -69,3 +69,22 @@ TestClusterRoleBinding: rbacv1.#ClusterRoleBinding & {
         }
     ]
 }
+
+DependentClusterRoleBinding: rbacv1.#ClusterRoleBinding & {
+    apiVersion: "rbac.authorization.k8s.io/v1"
+    kind: "ClusterRoleBinding"
+    metadata: generateName: "test-"
+    roleRef: {
+        apiGroup: "rbac.authorization.k8s.io"
+        kind: "ClusterRole"
+        name: TestClusterRole.metadata.name
+    }
+    subjects: [
+        {
+            kind: "ServiceAccount"
+            name: TestServiceAccount.metadata.name
+            namespace: TestNs.metadata.name
+        }
+    ]
+    _after: TestClusterRoleBinding.metadata.resourceVersion
+}
