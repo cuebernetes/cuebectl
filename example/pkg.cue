@@ -35,23 +35,6 @@ TestServiceAccount: corev1.#ServiceAccount & {
     }
 }
 
-TestClusterRole: rbacv1.#ClusterRole & {
-    apiVersion: "rbac.authorization.k8s.io/v1"
-    kind: "ClusterRole"
-    metadata: generateName: "test-"
-    rules: [
-        {
-            apiGroups: ["*"]
-            resources: ["*"]
-            verbs: ["*"]
-        },
-        {
-            nonResourceURLs: ["*"]
-            verbs: ["*"]
-        }
-    ]
-}
-
 TestClusterRoleBinding: rbacv1.#ClusterRoleBinding & {
     apiVersion: "rbac.authorization.k8s.io/v1"
     kind: "ClusterRoleBinding"
@@ -66,6 +49,23 @@ TestClusterRoleBinding: rbacv1.#ClusterRoleBinding & {
             kind: "ServiceAccount"
             name: TestServiceAccount.metadata.name
             namespace: TestNs.metadata.name
+        }
+    ]
+}
+
+TestClusterRole: rbacv1.#ClusterRole & {
+    apiVersion: "rbac.authorization.k8s.io/v1"
+    kind: "ClusterRole"
+    metadata: generateName: "test-"
+    rules: [
+        {
+            apiGroups: ["*"]
+            resources: ["*"]
+            verbs: ["*"]
+        },
+        {
+            nonResourceURLs: ["*"]
+            verbs: ["*"]
         }
     ]
 }

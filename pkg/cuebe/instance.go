@@ -9,6 +9,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/util/workqueue"
 )
 
 func Do(client dynamic.Interface, mapper meta.RESTMapper, path string) error {
@@ -32,52 +33,64 @@ func Do(client dynamic.Interface, mapper meta.RESTMapper, path string) error {
 		instance.Build(i)
 	}
 
+	queue := workqueue.NewRateLimitingQueue(workqueue.DefaultItemBasedRateLimiter())
 	itr, err := instance.Value().Fields()
 	if err != nil {
 		return err
 	}
-
-	created := map[string]struct{}{}
-	cont := itr.Next()
-	rescan := false
-	for cont {
-		l := itr.Label()
-		if _, ok := created[l]; ok {
-			cont = itr.Next()
-			continue
-		}
-		err := itr.Value().Validate(cue.Concrete(true))
-		if err != nil {
-			fmt.Printf("cannot create %s yet: %s\n", l, err)
-			rescan = true
-		} else {
-			fmt.Printf("%s is resolved, creating\n", l)
-			i, err := instanceFromCluster(itr.Value(), instance, ensurer)
-			if err != nil {
-				fmt.Printf("error: couldn't create object %s: %s\n", l, err)
-				rescan = true
-			} else {
-				instance = i
-				created[l] = struct{}{}
-			}
-		}
-		cont = itr.Next()
-
-		// restart
-		if cont == false && rescan == true {
-			itr, err = instance.Value().Fields()
-			if err != nil {
-				return err
-			}
-			cont = itr.Next()
-			rescan = false
-		}
+	for itr.Next() {
+		queue.Add(itr.Label())
 	}
+	for {
+		if queue.Len() == 0 {
+			queue.ShutDown()
+			break
+		}
+
+		func () {
+			item, shutdown := queue.Get()
+			if shutdown {
+				return
+			}
+			defer queue.Done(item)
+
+			label, ok :=  item.(string)
+			if !ok {
+				fmt.Printf("WARNING: %#v is being dropped because it is not a string\n", label)
+				queue.Forget(label)
+				return
+			}
+			cueValue := instance.Lookup(label)
+			if !cueValue.Exists() {
+				fmt.Printf("WARNING: %s does not exist in the instance\n", label)
+				queue.Forget(label)
+				return
+			}
+
+			if err := cueValue.Validate(cue.Concrete(true)); err != nil {
+				fmt.Println(label, "cannot be created yet: ", err)
+				queue.AddRateLimited(item)
+				return
+			}
+
+			instance, err = instanceFromCluster(cueValue, label, instance, ensurer)
+			if err != nil {
+				fmt.Printf("error syncing %v with cluster", item)
+				queue.AddRateLimited(item)
+				return
+			}
+
+			fmt.Println("created", label)
+
+			queue.Forget(item)
+		}()
+	}
+
 	return nil
 }
 
-// returns a new instance with the value of in from the cluster by creating in
-func instanceFromCluster(in cue.Value, i *cue.Instance, ensurer ensure.Interface) (*cue.Instance, error) {
+// instanceFromCluster returns a new instance with the value of in from the cluster by creating in
+func instanceFromCluster(in cue.Value, label string, i *cue.Instance, ensurer ensure.Interface) (*cue.Instance, error) {
 	obj := &unstructured.Unstructured{}
 
 	if err := in.Decode(obj); err != nil {
@@ -88,10 +101,5 @@ func instanceFromCluster(in cue.Value, i *cue.Instance, ensurer ensure.Interface
 		return nil, err
 	}
 
-	l, ok := in.Label()
-	if !ok {
-		return nil, fmt.Errorf("no label")
-	}
-
-	return i.Fill(out, l)
+	return i.Fill(out, label)
 }
