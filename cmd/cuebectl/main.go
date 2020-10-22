@@ -12,8 +12,8 @@ func main() {
 	flags := genericclioptions.NewConfigFlags(true)
 	streams := genericclioptions.IOStreams{In: os.Stdin, Out: os.Stdout, ErrOut: os.Stderr}
 	root := &cobra.Command{
-		Use:     "cuebectl",
-		Short:   "a tool for interacting with kube clusters via cue manifests",
+		Use:   "cuebectl",
+		Short: "a tool for interacting with kube clusters via cue manifests",
 		//Version: version.Version,
 	}
 	root.AddCommand(cmd.NewCmdApply("apply", flags, streams))
