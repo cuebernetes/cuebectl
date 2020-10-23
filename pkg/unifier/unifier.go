@@ -30,7 +30,7 @@ func (e NotConcreteError) Error() string {
 type ClusterUnifier struct {
 	initial, unified *cue.Instance
 	informerSet      informerset.Interface
-	stopc            chan struct{}
+	stopc            <-chan struct{}
 
 	// protects access to the cue.Instance being unified
 	sync.RWMutex
@@ -103,7 +103,7 @@ func (u *ClusterUnifier) FromCluster(locators []*identity.Locator) (current map[
 	return
 }
 
-func NewClusterUnifier(instance *cue.Instance, informerSet informerset.Interface, stopc chan struct{}) (*ClusterUnifier, error) {
+func NewClusterUnifier(instance *cue.Instance, informerSet informerset.Interface, stopc <-chan struct{}) (*ClusterUnifier, error) {
 	return &ClusterUnifier{
 		initial:     instance,
 		informerSet: informerSet,

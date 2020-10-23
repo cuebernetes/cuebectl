@@ -24,10 +24,10 @@ type DynamicInformerSet struct {
 	// the keys are write-once, so a sync.Map will work fine and reduce lock contention
 	informers sync.Map
 
-	stopc chan struct{}
+	stopc <-chan struct{}
 }
 
-func NewDynamicInformerSet(client dynamic.Interface, stopc chan struct{}) *DynamicInformerSet {
+func NewDynamicInformerSet(client dynamic.Interface, stopc <-chan struct{}) *DynamicInformerSet {
 	return &DynamicInformerSet{
 		client:    client,
 		informers: sync.Map{},

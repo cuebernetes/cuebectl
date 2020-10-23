@@ -1,13 +1,16 @@
 package cuebe
 
 import (
+	"context"
 	"fmt"
 	"sync"
 
 	"cuelang.org/go/cue"
 	"cuelang.org/go/cue/load"
 	"k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/util/workqueue"
 
 	"github.com/cuebernetes/cuebectl/pkg/accumulator"
@@ -17,12 +20,11 @@ import (
 	"github.com/cuebernetes/cuebectl/pkg/unifier"
 )
 
-func Do(client dynamic.Interface, mapper meta.RESTMapper, path string) error {
+func Do(ctx context.Context, client dynamic.Interface, mapper meta.RESTMapper, path string) error {
 	var r cue.Runtime
 
-	stopc := make(chan struct{})
 	ensurer := ensure.NewDynamicUnstructuredEnsurer(client, mapper)
-	informerSet := informerset.NewDynamicInformerSet(client, stopc)
+	informerSet := informerset.NewDynamicInformerSet(client, ctx.Done())
 
 	is := load.Instances([]string{"."}, &load.Config{
 		Dir: path,
@@ -40,7 +42,7 @@ func Do(client dynamic.Interface, mapper meta.RESTMapper, path string) error {
 	}
 
 	syncChan := make(chan identity.Locator)
-	clusterUnifier, err := unifier.NewClusterUnifier(instance, informerSet, make(chan struct{}))
+	clusterUnifier, err := unifier.NewClusterUnifier(instance, informerSet, ctx.Done())
 	if err != nil {
 		return err
 	}
@@ -57,6 +59,45 @@ func Do(client dynamic.Interface, mapper meta.RESTMapper, path string) error {
 		queue.Add(itr.Label())
 		total++
 	}
+
+	clusterQueue := workqueue.NewRateLimitingQueue(workqueue.DefaultControllerRateLimiter())
+
+	handlers := cache.ResourceEventHandlerFuncs{
+		AddFunc: func (obj interface{}) {
+			clusterQueue.Add(obj)
+		},
+		UpdateFunc: func (oldObj, obj interface{}) {
+			clusterQueue.Add(obj)
+		},
+		DeleteFunc: func (obj interface{}) {
+			clusterQueue.Add(obj)
+		},
+	}
+
+	watch := func() {
+		for {
+			if clusterQueue.ShuttingDown() {
+				return
+			}
+
+			func() {
+				item, shutdown := clusterQueue.Get()
+				if shutdown {
+					return
+				}
+				defer clusterQueue.Done(item)
+
+				fmt.Println("Cluster State: ")
+				fromCluster := clusterUnifier.FromCluster(syncer.Locators())
+				for _, o := range fromCluster {
+					u := o.(*unstructured.Unstructured)
+					fmt.Println(u.GetObjectKind().GroupVersionKind().String(), u.GetName(), u.GetNamespace())
+				}
+				fmt.Println("End Cluster State")
+			}()
+		}
+	}
+	go watch()
 
 	var wg sync.WaitGroup
 	process := func() {
@@ -95,11 +136,15 @@ func Do(client dynamic.Interface, mapper meta.RESTMapper, path string) error {
 				}
 
 				// start up informers for newly synced NGVRs
-				if inf := informerSet.Get(locator.NamespacedGroupVersionResource); inf == nil {
-					informerSet.Add(locator.NamespacedGroupVersionResource, informerset.DefaultNamespacedDynamicInformerFactory)
+				inf := informerSet.Get(locator.NamespacedGroupVersionResource)
+				if inf == nil {
+					inf = informerSet.Add(locator.NamespacedGroupVersionResource, informerset.DefaultNamespacedDynamicInformerFactory)
 				}
-
-				fmt.Println("created", label)
+				// add an eventhandler that only reacts to the synced object
+				inf.Informer().AddEventHandler(cache.FilteringResourceEventHandler{
+					FilterFunc: locator.FilterFunc(),
+					Handler: handlers,
+				})
 
 				queue.Forget(item)
 			}()
@@ -115,7 +160,8 @@ func Do(client dynamic.Interface, mapper meta.RESTMapper, path string) error {
 		count := 0
 		for {
 			select {
-			case <-syncChan:
+			case p := <-syncChan:
+				fmt.Println("created", p.Path)
 				count++
 			}
 			if count == total {
@@ -127,5 +173,6 @@ func Do(client dynamic.Interface, mapper meta.RESTMapper, path string) error {
 
 	wg.Wait()
 
+	<-ctx.Done()
 	return nil
 }

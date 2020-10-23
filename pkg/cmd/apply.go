@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"github.com/cuebernetes/cuebectl/pkg/signals"
 
 	"github.com/spf13/cobra"
 	"k8s.io/cli-runtime/pkg/genericclioptions"
@@ -98,5 +99,5 @@ func (o *ApplyOptions) Run(f cmdutil.Factory, cmd *cobra.Command, args []string)
 	if err != nil {
 		return err
 	}
-	return cuebe.Do(client, mapper, args[0])
+	return cuebe.Do(signals.Context(), client, mapper, args[0])
 }
