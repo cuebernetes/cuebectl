@@ -1,6 +1,7 @@
 package accumulator
 
 import (
+	"strings"
 	"sync"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -13,20 +14,14 @@ import (
 type LocationAccumulator struct {
 	ensurer ensure.Interface
 
-	// returns locators after they have been synced the first time.
-	synced chan identity.Locator
-
-	// locators to lookup values that have already been synced at least once
-	locators []*identity.Locator
-
-	sync.RWMutex
+	// locators to lookup values that have been synced at least once. sync.Map because it is a grow-only cache
+	locators sync.Map
 }
 
-func NewLocationAccumulator(ensurer ensure.Interface, synced chan identity.Locator) *LocationAccumulator {
+func NewLocationAccumulator(ensurer ensure.Interface) *LocationAccumulator {
 	return &LocationAccumulator{
 		ensurer:  ensurer,
-		synced:   synced,
-		locators: make([]*identity.Locator, 0),
+		locators: sync.Map{},
 	}
 }
 
@@ -38,19 +33,19 @@ func (a *LocationAccumulator) Sync(obj *unstructured.Unstructured, path ...strin
 		return nil, err
 	}
 	locator.Path = path
-	a.synced <- locator
 
-	a.Lock()
-	a.locators = append(a.locators, &locator)
-	a.Unlock()
+	a.locators.Store(strings.Join(path, "."), &locator)
+
 	return &locator, nil
 }
 
 // Locators returns the list of locators for concrete values
 func (a *LocationAccumulator) Locators() (locators []*identity.Locator) {
 	locators = make([]*identity.Locator, 0)
-	a.RLock()
-	defer a.RUnlock()
-	locators = append(locators, a.locators...)
+	a.locators.Range(func(key, value interface{}) bool {
+		l := value.(*identity.Locator)
+		locators = append(locators, l)
+		return true
+	})
 	return
 }

@@ -30,6 +30,7 @@ type ApplyOptions struct {
 	CmdParent         string
 	Namespace         string
 	ExplicitNamespace bool
+	Watch             bool
 
 	resource.FilenameOptions
 	genericclioptions.IOStreams
@@ -63,6 +64,7 @@ func NewCmdApply(parent string, flags *genericclioptions.ConfigFlags, streams ge
 	}
 
 	cmd.Flags().BoolP("help", "h", false, fmt.Sprintf("Help for %s apply", parent))
+	cmd.Flags().BoolP("watch", "w", false, "after creating resources, continue to watch cluster state")
 	cmdutil.AddFilenameOptionFlags(cmd, &o.FilenameOptions, "identifying the resources to send to a server.")
 	o.configFlags.AddFlags(cmd.Flags())
 
@@ -77,7 +79,10 @@ func (o *ApplyOptions) Complete(f cmdutil.Factory, cmd *cobra.Command, args []st
 	if err != nil {
 		return err
 	}
-
+	o.Watch, err = cmd.Flags().GetBool("watch")
+	if err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -99,5 +104,5 @@ func (o *ApplyOptions) Run(f cmdutil.Factory, cmd *cobra.Command, args []string)
 	if err != nil {
 		return err
 	}
-	return cuebe.Do(signals.Context(), client, mapper, args[0])
+	return cuebe.Do(signals.Context(), client, mapper, args[0], o.Watch)
 }

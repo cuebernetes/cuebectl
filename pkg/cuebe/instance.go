@@ -3,28 +3,27 @@ package cuebe
 import (
 	"context"
 	"fmt"
-	"sync"
 
 	"cuelang.org/go/cue"
 	"cuelang.org/go/cue/load"
 	"k8s.io/apimachinery/pkg/api/meta"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/client-go/dynamic"
-	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/util/workqueue"
 
 	"github.com/cuebernetes/cuebectl/pkg/accumulator"
+	"github.com/cuebernetes/cuebectl/pkg/cache"
 	"github.com/cuebernetes/cuebectl/pkg/ensure"
 	"github.com/cuebernetes/cuebectl/pkg/identity"
-	"github.com/cuebernetes/cuebectl/pkg/informerset"
 	"github.com/cuebernetes/cuebectl/pkg/unifier"
 )
 
-func Do(ctx context.Context, client dynamic.Interface, mapper meta.RESTMapper, path string) error {
+func Do(ctx context.Context, client dynamic.Interface, mapper meta.RESTMapper, path string, watch bool) error {
+	doctx, cancel := context.WithCancel(ctx)
+
 	var r cue.Runtime
 
 	ensurer := ensure.NewDynamicUnstructuredEnsurer(client, mapper)
-	informerSet := informerset.NewDynamicInformerSet(client, ctx.Done())
+	informerCache := cache.NewDynamicInformerCache(client, doctx.Done())
 
 	is := load.Instances([]string{"."}, &load.Config{
 		Dir: path,
@@ -41,13 +40,12 @@ func Do(ctx context.Context, client dynamic.Interface, mapper meta.RESTMapper, p
 		return err
 	}
 
-	syncChan := make(chan identity.Locator)
-	clusterUnifier, err := unifier.NewClusterUnifier(instance, informerSet, ctx.Done())
+	clusterUnifier, err := unifier.NewClusterUnifier(&r, is[0], informerCache, doctx.Done())
 	if err != nil {
 		return err
 	}
 
-	syncer := accumulator.NewLocationAccumulator(ensurer, syncChan)
+	syncer := accumulator.NewLocationAccumulator(ensurer)
 
 	total := 0
 	queue := workqueue.NewRateLimitingQueue(workqueue.DefaultItemBasedRateLimiter())
@@ -62,19 +60,7 @@ func Do(ctx context.Context, client dynamic.Interface, mapper meta.RESTMapper, p
 
 	clusterQueue := workqueue.NewRateLimitingQueue(workqueue.DefaultControllerRateLimiter())
 
-	handlers := cache.ResourceEventHandlerFuncs{
-		AddFunc: func (obj interface{}) {
-			clusterQueue.Add(obj)
-		},
-		UpdateFunc: func (oldObj, obj interface{}) {
-			clusterQueue.Add(obj)
-		},
-		DeleteFunc: func (obj interface{}) {
-			clusterQueue.Add(obj)
-		},
-	}
-
-	watch := func() {
+	sync := func() {
 		for {
 			if clusterQueue.ShuttingDown() {
 				return
@@ -87,23 +73,26 @@ func Do(ctx context.Context, client dynamic.Interface, mapper meta.RESTMapper, p
 				}
 				defer clusterQueue.Done(item)
 
+				u, ok := item.(*identity.LocatedUnstructured)
+				if !ok {
+					fmt.Printf("expected object of type LocatedUnstructured, got: %#v\n", u)
+					return
+				}
+				queue.Add(u.Locator.Path[0])
 				fmt.Println("Cluster State: ")
-				fromCluster := clusterUnifier.FromCluster(syncer.Locators())
+				fromCluster := informerCache.FromCluster(syncer.Locators())
 				for _, o := range fromCluster {
-					u := o.(*unstructured.Unstructured)
-					fmt.Println(u.GetObjectKind().GroupVersionKind().String(), u.GetName(), u.GetNamespace())
+					fmt.Println(o.GetObjectKind().GroupVersionKind().String(), o.GetName(), o.GetNamespace())
 				}
 				fmt.Println("End Cluster State")
 			}()
 		}
 	}
-	go watch()
+	go sync()
 
-	var wg sync.WaitGroup
 	process := func() {
 		for {
 			if queue.ShuttingDown() {
-				wg.Done()
 				break
 			}
 
@@ -120,7 +109,12 @@ func Do(ctx context.Context, client dynamic.Interface, mapper meta.RESTMapper, p
 					queue.Forget(label)
 					return
 				}
-				fromCluster := clusterUnifier.FromCluster(syncer.Locators())
+				locators := syncer.Locators()
+				if len(locators) == total && !watch {
+					cancel()
+					return
+				}
+				fromCluster := informerCache.FromCluster(locators)
 				obj, err := clusterUnifier.Lookup(fromCluster, label)
 				if err != nil {
 					fmt.Println(err)
@@ -136,43 +130,20 @@ func Do(ctx context.Context, client dynamic.Interface, mapper meta.RESTMapper, p
 				}
 
 				// start up informers for newly synced NGVRs
-				inf := informerSet.Get(locator.NamespacedGroupVersionResource)
+				inf := informerCache.Get(locator.NamespacedGroupVersionResource)
 				if inf == nil {
-					inf = informerSet.Add(locator.NamespacedGroupVersionResource, informerset.DefaultNamespacedDynamicInformerFactory)
+					inf = informerCache.Add(locator.NamespacedGroupVersionResource, cache.DefaultNamespacedDynamicInformerFactory)
 				}
 				// add an eventhandler that only reacts to the synced object
-				inf.Informer().AddEventHandler(cache.FilteringResourceEventHandler{
-					FilterFunc: locator.FilterFunc(),
-					Handler: handlers,
-				})
+				inf.Informer().AddEventHandler(locator.EventHandler(clusterQueue))
 
 				queue.Forget(item)
 			}()
 		}
 	}
 
-	wg.Add(2)
-	go process()
 	go process()
 
-	// shut down queue only when everything has been synced
-	go func() {
-		count := 0
-		for {
-			select {
-			case p := <-syncChan:
-				fmt.Println("created", p.Path)
-				count++
-			}
-			if count == total {
-				queue.ShutDown()
-				return
-			}
-		}
-	}()
-
-	wg.Wait()
-
-	<-ctx.Done()
+	<-doctx.Done()
 	return nil
 }
