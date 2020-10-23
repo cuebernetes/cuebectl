@@ -8,6 +8,8 @@ import (
 type Locator struct {
 	NamespacedGroupVersionResource
 	Name string
+	// Path in instance
+	Path []string
 }
 
 // NamespacedGroupVersionResource is used to look up informers for resolved objects from the instance
