@@ -1,5 +1,10 @@
 # cuebectl
 
-The future home of a kubectl plugin that can unify cue definitions with a cluster.
+`cuebectl` takes a collection of cue files that describe kubernetes resources, and continually reconciles them with 
+cluster state.
 
-For now, a simple proof of concept (that can't be used as a kubectl plugin)
+Example:
+
+```sh
+$ cuebectl apply example
+```

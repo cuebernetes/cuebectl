@@ -2,8 +2,8 @@ package cmd
 
 import (
 	"fmt"
-	"github.com/cuebernetes/cuebectl/pkg/signals"
 
+	"cuelang.org/go/cue/load"
 	"github.com/spf13/cobra"
 	"k8s.io/cli-runtime/pkg/genericclioptions"
 	"k8s.io/cli-runtime/pkg/resource"
@@ -11,7 +11,8 @@ import (
 	cmdutil "k8s.io/kubectl/pkg/cmd/util"
 	"k8s.io/kubectl/pkg/util/templates"
 
-	"github.com/cuebernetes/cuebectl/pkg/cuebe"
+	"github.com/cuebernetes/cuebectl/pkg/controller"
+	"github.com/cuebernetes/cuebectl/pkg/signals"
 )
 
 var (
@@ -104,5 +105,20 @@ func (o *ApplyOptions) Run(f cmdutil.Factory, cmd *cobra.Command, args []string)
 	if err != nil {
 		return err
 	}
-	return cuebe.Do(signals.Context(), client, mapper, args[0], o.Watch)
+
+	is := load.Instances([]string{"."}, &load.Config{
+		Dir: args[0],
+	})
+	if len(is) > 1 {
+		return fmt.Errorf("multiple instance loading currently not supported")
+	}
+	if len(is) < 1 {
+		return fmt.Errorf("no instances found")
+	}
+	controller, err := controller.NewCueInstanceController(signals.Context(), client, mapper, is[0], o.Watch)
+	if err != nil {
+		return err
+	}
+	controller.Start()
+	return nil
 }
