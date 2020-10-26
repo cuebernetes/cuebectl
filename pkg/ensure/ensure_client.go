@@ -64,6 +64,9 @@ func (e *DynamicUnstructuredEnsurer) EnsureUnstructured(in *unstructured.Unstruc
 
 	locator = identity.Locator{NamespacedGroupVersionResource: identity.NamespacedGroupVersionResource{GroupVersionResource: mapping.Resource, Namespace: namespace}, Name: in.GetName()}
 
+	// TODO: should this be needed?
+	in.SetManagedFields(nil)
+
 	// apply if exists
 	b, err := in.MarshalJSON()
 	if err != nil {
