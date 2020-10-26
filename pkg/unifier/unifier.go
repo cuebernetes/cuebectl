@@ -7,6 +7,7 @@ import (
 	"cuelang.org/go/cue/build"
 	"github.com/pkg/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/client-go/util/workqueue"
 
 	"github.com/cuebernetes/cuebectl/pkg/cache"
 	"github.com/cuebernetes/cuebectl/pkg/identity"
@@ -18,7 +19,6 @@ type ClusterUnifier struct {
 	runtime     *cue.Runtime
 	instance    *build.Instance
 	informerSet cache.Interface
-	stopc       <-chan struct{}
 
 	// protects access to the build.Instance being unified
 	sync.RWMutex
@@ -38,6 +38,23 @@ func (u *ClusterUnifier) unify(fromCluster map[*identity.Locator]*unstructured.U
 		if instance, err = instance.Fill(o, l.Path...); err != nil {
 			return
 		}
+	}
+	return
+}
+
+func (u *ClusterUnifier) Fill(queue workqueue.RateLimitingInterface) (total int, err error) {
+	instance, err := u.runtime.Build(u.instance)
+	if err != nil {
+		return
+	}
+
+	itr, err := instance.Value().Fields()
+	if err != nil {
+		return
+	}
+	for itr.Next() {
+		total++
+		queue.Add(itr.Label())
 	}
 	return
 }
@@ -66,11 +83,10 @@ func (u *ClusterUnifier) Lookup(fromCluster map[*identity.Locator]*unstructured.
 	return obj, nil
 }
 
-func NewClusterUnifier(runtime *cue.Runtime, instance *build.Instance, informerSet cache.Interface, stopc <-chan struct{}) (*ClusterUnifier, error) {
+func NewClusterUnifier(instance *build.Instance, informerSet cache.Interface) *ClusterUnifier {
 	return &ClusterUnifier{
-		runtime:     runtime,
+		runtime:     &cue.Runtime{},
 		instance:    instance,
 		informerSet: informerSet,
-		stopc:       stopc,
-	}, nil
+	}
 }

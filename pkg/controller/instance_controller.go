@@ -4,9 +4,9 @@ import (
 	"context"
 	"fmt"
 
-	"cuelang.org/go/cue"
 	"cuelang.org/go/cue/build"
 	"k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/util/workqueue"
 
@@ -20,67 +20,65 @@ import (
 type CueInstanceController struct {
 	clusterQueue, cueQueue workqueue.RateLimitingInterface
 	informerCache          *cache.DynamicInformerCache
-	syncer                 *tracker.LocationTracker
+	tracker                *tracker.LocationTracker
 	unifier                *unifier.ClusterUnifier
-
-	// TODO: clean up
-	context context.Context
-	total   int
-	watch   bool
-	cancel  context.CancelFunc
 }
 
-func NewCueInstanceController(ctx context.Context, client dynamic.Interface, mapper meta.RESTMapper, buildInstance *build.Instance, watch bool) (*CueInstanceController, error) {
-	var r cue.Runtime
-	doctx, cancel := context.WithCancel(ctx)
-
-	ensurer := ensure.NewDynamicUnstructuredEnsurer(client, mapper)
-	informerCache := cache.NewDynamicInformerCache(client, doctx.Done())
-
-	instance, err := r.Build(buildInstance)
-	if err != nil {
-		return nil, err
-	}
-	instance.Value().Len()
-
-	clusterUnifier, err := unifier.NewClusterUnifier(&r, buildInstance, informerCache, doctx.Done())
-	if err != nil {
-		return nil, err
-	}
-
-	syncer := tracker.NewLocationTracker(ensurer)
-
-	// TODO: cleanup
-	total := 0
-	queue := workqueue.NewRateLimitingQueue(workqueue.DefaultItemBasedRateLimiter())
-	itr, err := instance.Value().Fields()
-	if err != nil {
-		return nil, err
-	}
-	for itr.Next() {
-		queue.Add(itr.Label())
-		total++
-	}
+func NewCueInstanceController(client dynamic.Interface, mapper meta.RESTMapper, buildInstance *build.Instance) *CueInstanceController {
+	informerCache := cache.NewDynamicInformerCache(client)
 	return &CueInstanceController{
-		context:       doctx,
 		clusterQueue:  workqueue.NewRateLimitingQueue(workqueue.DefaultControllerRateLimiter()),
-		cueQueue:      queue,
-		syncer:        syncer,
-		unifier:       clusterUnifier,
+		cueQueue:      workqueue.NewRateLimitingQueue(workqueue.DefaultItemBasedRateLimiter()),
+		tracker:       tracker.NewLocationTracker(ensure.NewDynamicUnstructuredEnsurer(client, mapper)),
+		unifier:       unifier.NewClusterUnifier(buildInstance, informerCache),
 		informerCache: informerCache,
-		total:         total,
-		watch:         watch,
-		cancel:        cancel,
-	}, nil
+	}
 }
 
-func (c *CueInstanceController) Start() {
-	go c.processClusterState()
-	go c.processCueInstance()
-	<-c.context.Done()
+func (c *CueInstanceController) Start(ctx context.Context, stateChan chan map[*identity.Locator]*unstructured.Unstructured) (count int, err error) {
+	count, err = c.unifier.Fill(c.cueQueue)
+	go c.processClusterStateQueue(stateChan)
+	go c.processCueQueue(ctx)
+	return
 }
 
-func (c *CueInstanceController) processClusterState() {
+func (c *CueInstanceController) syncUnstructured(u *identity.LocatedUnstructured, stateChan chan map[*identity.Locator]*unstructured.Unstructured) {
+	// requeue the label associated with the object in the cue instance
+	c.cueQueue.Add(u.Locator.Path[0])
+
+	// send back current cluster state
+	stateChan <- c.informerCache.FromCluster(c.tracker.Locators())
+}
+
+func (c *CueInstanceController) syncCueInstance(label string, stopc <- chan struct{}) {
+	// unify cue instance with current cluster state and lookup value at `label`
+	obj, err := c.unifier.Lookup(c.informerCache.FromCluster(c.tracker.Locators()), label)
+	if err != nil {
+		fmt.Println(err)
+		c.cueQueue.AddRateLimited(label)
+		return
+	}
+
+	// sync value at `label` with the cluster
+	locator, err := c.tracker.Sync(obj, label)
+	if err != nil {
+		fmt.Println(err)
+		c.cueQueue.AddRateLimited(label)
+		return
+	}
+
+	// start up informers for newly synced NGVRs
+	inf := c.informerCache.Get(locator.NamespacedGroupVersionResource)
+	if inf == nil {
+		inf = c.informerCache.Add(locator.NamespacedGroupVersionResource, cache.DefaultNamespacedDynamicInformerFactory, stopc)
+	}
+	// add an eventhandler that only reacts to the synced object
+	inf.Informer().AddEventHandler(locator.EventHandler(c.clusterQueue))
+
+	c.cueQueue.Forget(label)
+}
+
+func (c *CueInstanceController) processClusterStateQueue(stateChan chan map[*identity.Locator]*unstructured.Unstructured) {
 	for {
 		if c.clusterQueue.ShuttingDown() {
 			return
@@ -98,19 +96,12 @@ func (c *CueInstanceController) processClusterState() {
 				fmt.Printf("expected object of type LocatedUnstructured, got: %#v\n", u)
 				return
 			}
-			c.cueQueue.Add(u.Locator.Path[0])
-
-			fmt.Println("Cluster State: ")
-			fromCluster := c.informerCache.FromCluster(c.syncer.Locators())
-			for _, o := range fromCluster {
-				fmt.Println(o.GetObjectKind().GroupVersionKind().String(), o.GetName(), o.GetNamespace())
-			}
-			fmt.Println("End Cluster State")
+			c.syncUnstructured(u, stateChan)
 		}()
 	}
 }
 
-func (c *CueInstanceController) processCueInstance() {
+func (c *CueInstanceController) processCueQueue(ctx context.Context) {
 	for {
 		if c.cueQueue.ShuttingDown() {
 			break
@@ -129,35 +120,7 @@ func (c *CueInstanceController) processCueInstance() {
 				c.cueQueue.Forget(label)
 				return
 			}
-			locators := c.syncer.Locators()
-			if len(locators) == c.total && !c.watch {
-				c.cancel()
-				return
-			}
-			fromCluster := c.informerCache.FromCluster(locators)
-			obj, err := c.unifier.Lookup(fromCluster, label)
-			if err != nil {
-				fmt.Println(err)
-				c.cueQueue.AddRateLimited(item)
-				return
-			}
-
-			locator, err := c.syncer.Sync(obj, label)
-			if err != nil {
-				fmt.Println(err)
-				c.cueQueue.AddRateLimited(item)
-				return
-			}
-
-			// start up informers for newly synced NGVRs
-			inf := c.informerCache.Get(locator.NamespacedGroupVersionResource)
-			if inf == nil {
-				inf = c.informerCache.Add(locator.NamespacedGroupVersionResource, cache.DefaultNamespacedDynamicInformerFactory)
-			}
-			// add an eventhandler that only reacts to the synced object
-			inf.Informer().AddEventHandler(locator.EventHandler(c.clusterQueue))
-
-			c.cueQueue.Forget(item)
+			c.syncCueInstance(label, ctx.Done())
 		}()
 	}
 }

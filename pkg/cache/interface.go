@@ -9,7 +9,7 @@ import (
 
 type Interface interface {
 	Get(ngvr identity.NamespacedGroupVersionResource) informers.GenericInformer
-	Add(ngvr identity.NamespacedGroupVersionResource, factory NamespacedDynamicInformerFactory) informers.GenericInformer
+	Add(ngvr identity.NamespacedGroupVersionResource, factory NamespacedDynamicInformerFactory, stopc <-chan struct{}) informers.GenericInformer
 
 	FromCluster(locators []*identity.Locator) (current map[*identity.Locator]*unstructured.Unstructured)
 }

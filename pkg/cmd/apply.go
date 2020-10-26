@@ -1,10 +1,12 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 
 	"cuelang.org/go/cue/load"
 	"github.com/spf13/cobra"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/cli-runtime/pkg/genericclioptions"
 	"k8s.io/cli-runtime/pkg/resource"
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
@@ -12,6 +14,7 @@ import (
 	"k8s.io/kubectl/pkg/util/templates"
 
 	"github.com/cuebernetes/cuebectl/pkg/controller"
+	"github.com/cuebernetes/cuebectl/pkg/identity"
 	"github.com/cuebernetes/cuebectl/pkg/signals"
 )
 
@@ -115,10 +118,23 @@ func (o *ApplyOptions) Run(f cmdutil.Factory, cmd *cobra.Command, args []string)
 	if len(is) < 1 {
 		return fmt.Errorf("no instances found")
 	}
-	controller, err := controller.NewCueInstanceController(signals.Context(), client, mapper, is[0], o.Watch)
-	if err != nil {
-		return err
+	controller := controller.NewCueInstanceController(client, mapper, is[0])
+	stateChan := make(chan map[*identity.Locator]*unstructured.Unstructured)
+	ctx, cancel := context.WithCancel(signals.Context())
+	count, err := controller.Start(ctx, stateChan)
+
+	for {
+		select {
+		case msg := <-stateChan:
+			if !o.Watch && count == len(msg) {
+				fmt.Println("Finished")
+				cancel()
+			}
+			fmt.Println("received message", msg)
+		case <-ctx.Done():
+			fmt.Println("Exiting")
+			return nil
+		default:
+		}
 	}
-	controller.Start()
-	return nil
 }

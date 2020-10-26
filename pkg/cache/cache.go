@@ -19,15 +19,12 @@ type DynamicInformerCache struct {
 
 	// the keys are write-once, so a sync.Map will work fine and reduce lock contention
 	informers sync.Map
-
-	stopc <-chan struct{}
 }
 
-func NewDynamicInformerCache(client dynamic.Interface, stopc <-chan struct{}) *DynamicInformerCache {
+func NewDynamicInformerCache(client dynamic.Interface) *DynamicInformerCache {
 	return &DynamicInformerCache{
 		client:    client,
 		informers: sync.Map{},
-		stopc:     stopc,
 	}
 }
 
@@ -39,10 +36,10 @@ func (d *DynamicInformerCache) Get(ngvr identity.NamespacedGroupVersionResource)
 	return informer.(informers.GenericInformer)
 }
 
-func (d *DynamicInformerCache) Add(ngvr identity.NamespacedGroupVersionResource, factory NamespacedDynamicInformerFactory) informers.GenericInformer {
+func (d *DynamicInformerCache) Add(ngvr identity.NamespacedGroupVersionResource, factory NamespacedDynamicInformerFactory, stopc <-chan struct{}) informers.GenericInformer {
 	inf := factory(d.client, ngvr)
 	d.informers.Store(ngvr, inf)
-	go inf.Informer().Run(d.stopc)
+	go inf.Informer().Run(stopc)
 	return inf
 }
 
