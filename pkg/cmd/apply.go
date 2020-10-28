@@ -1,3 +1,6 @@
+// SPDX-License-Identifier:  Apache-2.0
+// SPDX-FileCopyrightText: 2020 Evan Cordell
+
 package cmd
 
 import (
@@ -123,6 +126,7 @@ func (o *ApplyOptions) Run(f cmdutil.Factory, cmd *cobra.Command, args []string)
 	errChan := make(chan error)
 
 	ctx, cancel := context.WithCancel(signals.Context())
+	defer cancel()
 	count, err := cueInstanceController.Start(ctx, stateChan, errChan)
 	if err != nil {
 		return err
