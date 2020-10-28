@@ -12,7 +12,7 @@ to try out, learn about CUE, and suggest ideas.
 
 ## Installation
 
-`cuebectl` can be installed standalone or as a kubectl plugin (`kubectl-cue`).
+`cuebectl` can be installed standalone or as a kubectl plugin (`kubectl-cue`). See the [latest release](https://github.com/cuebernetes/cuebectl/releases) for install instructions.
 
 ## Example
 
