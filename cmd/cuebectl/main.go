@@ -12,6 +12,7 @@ import (
 	"k8s.io/cli-runtime/pkg/genericclioptions"
 	"k8s.io/component-base/cli/globalflag"
 
+	"github.com/cuebernetes/cuebectl/internal/version"
 	"github.com/cuebernetes/cuebectl/pkg/cmd"
 )
 
@@ -21,7 +22,7 @@ func main() {
 	root := &cobra.Command{
 		Use:   commandName(),
 		Short: "a tool for interacting with kube clusters via cue manifests",
-		//Version: version.Version,
+		Version: version.Version,
 	}
 	globalflag.AddGlobalFlags(root.PersistentFlags(), commandName())
 	root.AddCommand(cmd.NewCmdApply(commandName(), flags, streams))

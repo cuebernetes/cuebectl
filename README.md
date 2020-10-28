@@ -3,6 +3,17 @@
 `cuebectl` takes a collection of [cue files](https://cuelang.org/) that describe kubernetes resources, and continually reconciles them with 
 cluster state, to allow declarative management of kubernetes resources.
 
+## Project Status
+
+**Exploratory** - 
+
+this is still largely a proof of concept to work out UX and explore features. But it's in a great state
+to try out, learn about CUE, and suggest ideas.
+
+## Installation
+
+`cuebectl` can be installed standalone or as a kubectl plugin (`kubectl-cue`).
+
 ## Example
 
 Without cuebectl, multiple imperative steps:
@@ -108,11 +119,6 @@ Operation cannot be fulfilled on serviceaccounts "test": the object has been mod
 created DependentClusterRoleBinding: /test-bp2kr (rbac.authorization.k8s.io/v1, Kind=ClusterRoleBinding)
 created TestClusterRoleBinding: /test-72qmg (rbac.authorization.k8s.io/v1, Kind=ClusterRoleBinding)
 ```
-
-
-## Installation
-
-`cuebectl` can be installed standalone or as a kubectl plugin (`kubectl-cue`).
 
 ## How does it work? 
 
