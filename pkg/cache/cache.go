@@ -1,13 +1,14 @@
 package cache
 
 import (
-	"fmt"
+	"strings"
 	"sync"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/informers"
+	"k8s.io/klog/v2"
 
 	"github.com/cuebernetes/cuebectl/pkg/identity"
 )
@@ -60,7 +61,7 @@ func (d *DynamicInformerCache) FromCluster(locators []*identity.Locator) (curren
 
 		// TODO: should this trigger a retry, since the unified state will be dirty?
 		if err != nil {
-			fmt.Println("WARNING:", o.Path, "has been synced but not found in cache")
+			klog.V(2).Infof("%s has been synced but not found in cache", strings.Join(o.Path, "/"))
 			continue
 		}
 		u, ok := fetched.(*unstructured.Unstructured)

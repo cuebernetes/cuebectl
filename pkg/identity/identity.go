@@ -23,7 +23,7 @@ type Locator struct {
 
 type LocatedUnstructured struct {
 	Locator
-	*unstructured.Unstructured``
+	*unstructured.Unstructured
 }
 
 // FilterFunc returns a function that can filter events to only react to objects identified by the locator
@@ -39,25 +39,24 @@ func (l Locator) FilterFunc() func(o interface{}) bool {
 
 // EventHandler returns an event handler for this locator that adds a locator to the incoming object and adds to queue
 func (l Locator) EventHandler(queue workqueue.RateLimitingInterface) cache.ResourceEventHandler {
-	addToQueue := func (obj interface{}) {
+	addToQueue := func(obj interface{}) {
 		queue.Add(&LocatedUnstructured{
-			Locator: l,
+			Locator:      l,
 			Unstructured: obj.(*unstructured.Unstructured),
 		})
 	}
 	return cache.FilteringResourceEventHandler{
 		FilterFunc: l.FilterFunc(),
 		Handler: cache.ResourceEventHandlerFuncs{
-			AddFunc: func (obj interface{}) {
+			AddFunc: func(obj interface{}) {
 				addToQueue(obj)
 			},
-			UpdateFunc: func (oldObj, obj interface{}) {
+			UpdateFunc: func(oldObj, obj interface{}) {
 				addToQueue(obj)
 			},
-			DeleteFunc: func (obj interface{}) {
+			DeleteFunc: func(obj interface{}) {
 				addToQueue(obj)
 			},
 		},
 	}
 }
-

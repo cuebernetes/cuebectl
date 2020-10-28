@@ -7,10 +7,8 @@ import (
 
 	"cuelang.org/go/cue/load"
 	"github.com/spf13/cobra"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/cli-runtime/pkg/genericclioptions"
-	"k8s.io/cli-runtime/pkg/printers"
 	"k8s.io/cli-runtime/pkg/resource"
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 	cmdutil "k8s.io/kubectl/pkg/cmd/util"
@@ -27,7 +25,7 @@ var (
 
 	applyExample = templates.Examples(`
 		# Apply a folder with cue definitions to a cluster
-		%[1]s apply -f example`)
+		%[1]s apply example`)
 )
 
 // ApplyOptions contains the input to the apply command.
@@ -58,10 +56,10 @@ func NewCmdApply(parent string, flags *genericclioptions.ConfigFlags, streams ge
 	o := NewApplyOptions(parent, flags, streams)
 
 	cmd := &cobra.Command{
-		Use:                   fmt.Sprintf("%s apply [flags]", parent),
+		Use:                   "apply [flags]",
 		DisableFlagsInUseLine: true,
 		Short:                 "Apply cue manifests",
-		Long:                  applyLong + "\n\n" + cmdutil.SuggestAPIResources(parent),
+		Long:                  applyLong,
 		Example:               fmt.Sprintf(applyExample, parent),
 		Run: func(cmd *cobra.Command, args []string) {
 			cmdutil.CheckErr(o.Complete(f, cmd, args))
@@ -72,7 +70,6 @@ func NewCmdApply(parent string, flags *genericclioptions.ConfigFlags, streams ge
 
 	cmd.Flags().BoolP("help", "h", false, fmt.Sprintf("Help for %s apply", parent))
 	cmd.Flags().BoolP("watch", "w", false, "after creating resources, continue to watch cluster state")
-	cmdutil.AddFilenameOptionFlags(cmd, &o.FilenameOptions, "identifying the resources to send to a server.")
 	o.configFlags.AddFlags(cmd.Flags())
 
 	return cmd
@@ -123,71 +120,40 @@ func (o *ApplyOptions) Run(f cmdutil.Factory, cmd *cobra.Command, args []string)
 	}
 	cueInstanceController := controller.NewCueInstanceController(client, mapper, is[0])
 	stateChan := make(chan map[*identity.Locator]*unstructured.Unstructured)
+	errChan := make(chan error)
+
 	ctx, cancel := context.WithCancel(signals.Context())
-	count, err := cueInstanceController.Start(ctx, stateChan)
+	count, err := cueInstanceController.Start(ctx, stateChan, errChan)
 	if err != nil {
 		return err
 	}
 
-	printer := printers.NewTablePrinter(printers.PrintOptions{})
+	printed := map[string]struct{}{}
 	for {
 		select {
 		case current := <-stateChan:
 			if !o.Watch && count == len(current) {
 				cancel()
 			}
-
-			if err := printer.PrintObj(toTable(current), o.IOStreams.Out); err != nil {
+			for l, u := range current {
+				path := strings.Join(l.Path, "/")
+				if _, ok := printed[path]; ok {
+					continue
+				}
+				printed[path] = struct{}{}
+				if _, err := fmt.Fprintf(o.IOStreams.Out,
+					"created %s: %s/%s (%s)\n",
+					path, u.GetNamespace(), u.GetName(), u.GroupVersionKind()); err != nil {
+					return err
+				}
+			}
+		case err := <-errChan:
+			if _, err := fmt.Fprintln(o.IOStreams.Out, err); err != nil {
 				return err
 			}
-
 		case <-ctx.Done():
 			return nil
 		default:
 		}
 	}
-}
-
-func toTable(current map[*identity.Locator]*unstructured.Unstructured) *metav1.Table {
-	t := metav1.Table{
-		TypeMeta: metav1.TypeMeta{
-			Kind: "Table",
-			APIVersion: "meta.k8s.io/v1beta1",
-		},
-		ColumnDefinitions: []metav1.TableColumnDefinition{
-			{
-				Name: "path",
-				Type: "string",
-			},
-			{
-				Name: "kind",
-				Type: "string",
-			},
-			{
-				Name: "apiVersion",
-				Type: "string",
-			},
-			{
-				Name: "namespace",
-				Type: "string",
-			},
-			{
-				Name: "name",
-				Type: "string",
-			},
-		},
-		Rows:  []metav1.TableRow{},
-	}
-	for l, obj := range current {
-		t.Rows = append(t.Rows, metav1.TableRow{
-			Cells: []interface{}{
-				strings.Join(l.Path, "/"),
-				obj.GetKind(),
-				obj.GetAPIVersion(),
-				obj.GetNamespace(),
-				obj.GetName(),
-			},
-		})
-	}
-	return &t
 }

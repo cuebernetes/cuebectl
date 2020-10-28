@@ -2,23 +2,36 @@ package main
 
 import (
 	"os"
+	"path/filepath"
+	"strings"
 
-	"github.com/cuebernetes/cuebectl/pkg/cmd"
 	"github.com/spf13/cobra"
 	"k8s.io/cli-runtime/pkg/genericclioptions"
+	"k8s.io/component-base/cli/globalflag"
+
+	"github.com/cuebernetes/cuebectl/pkg/cmd"
 )
 
 func main() {
 	flags := genericclioptions.NewConfigFlags(true)
 	streams := genericclioptions.IOStreams{In: os.Stdin, Out: os.Stdout, ErrOut: os.Stderr}
 	root := &cobra.Command{
-		Use:   "cuebectl",
+		Use:   commandName(),
 		Short: "a tool for interacting with kube clusters via cue manifests",
 		//Version: version.Version,
 	}
-	root.AddCommand(cmd.NewCmdApply("apply", flags, streams))
+	globalflag.AddGlobalFlags(root.PersistentFlags(), commandName())
+	root.AddCommand(cmd.NewCmdApply(commandName(), flags, streams))
 
 	if err := root.Execute(); err != nil {
 		os.Exit(1)
 	}
+}
+
+func commandName() string {
+	cli := filepath.Base(os.Args[0])
+	if strings.HasPrefix(cli, "kubectl-") {
+		return strings.TrimPrefix(cli, "kubectl-")
+	}
+	return cli
 }

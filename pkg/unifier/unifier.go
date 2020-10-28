@@ -1,6 +1,7 @@
 package unifier
 
 import (
+	"strings"
 	"sync"
 
 	"cuelang.org/go/cue"
@@ -71,7 +72,7 @@ func (u *ClusterUnifier) Lookup(fromCluster map[*identity.Locator]*unstructured.
 	defer u.RUnlock()
 	cueValue := instance.Lookup(path...)
 	if err := cueValue.Validate(cue.Concrete(true)); err != nil {
-		return nil, errors.WithMessagef(err, "%s not yet concrete", path)
+		return nil, errors.WithMessagef(err, "%s not yet concrete", strings.Join(path, "/"))
 	}
 
 	obj := &unstructured.Unstructured{}

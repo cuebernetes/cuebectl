@@ -2,13 +2,13 @@ package controller
 
 import (
 	"context"
-	"fmt"
 
 	"cuelang.org/go/cue/build"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/util/workqueue"
+	"k8s.io/klog/v2"
 
 	"github.com/cuebernetes/cuebectl/pkg/cache"
 	"github.com/cuebernetes/cuebectl/pkg/ensure"
@@ -35,10 +35,10 @@ func NewCueInstanceController(client dynamic.Interface, mapper meta.RESTMapper, 
 	}
 }
 
-func (c *CueInstanceController) Start(ctx context.Context, stateChan chan map[*identity.Locator]*unstructured.Unstructured) (count int, err error) {
+func (c *CueInstanceController) Start(ctx context.Context, stateChan chan map[*identity.Locator]*unstructured.Unstructured, errChan chan error) (count int, err error) {
 	count, err = c.unifier.Fill(c.cueQueue)
 	go c.processClusterStateQueue(stateChan)
-	go c.processCueQueue(ctx)
+	go c.processCueQueue(ctx, errChan)
 	return
 }
 
@@ -50,11 +50,12 @@ func (c *CueInstanceController) syncUnstructured(u *identity.LocatedUnstructured
 	stateChan <- c.informerCache.FromCluster(c.tracker.Locators())
 }
 
-func (c *CueInstanceController) syncCueInstance(label string, stopc <- chan struct{}) {
+func (c *CueInstanceController) syncCueInstance(label string, errChan chan error, stopc <-chan struct{}) {
 	// unify cue instance with current cluster state and lookup value at `label`
 	obj, err := c.unifier.Lookup(c.informerCache.FromCluster(c.tracker.Locators()), label)
 	if err != nil {
-		fmt.Println(err)
+		errChan <- err
+		klog.V(1).Error(err, "could not lookup")
 		c.cueQueue.AddRateLimited(label)
 		return
 	}
@@ -62,7 +63,8 @@ func (c *CueInstanceController) syncCueInstance(label string, stopc <- chan stru
 	// sync value at `label` with the cluster
 	locator, err := c.tracker.Sync(obj, label)
 	if err != nil {
-		fmt.Println(err)
+		errChan <- err
+		klog.V(1).Error(err, "could not sync")
 		c.cueQueue.AddRateLimited(label)
 		return
 	}
@@ -93,7 +95,7 @@ func (c *CueInstanceController) processClusterStateQueue(stateChan chan map[*ide
 
 			u, ok := item.(*identity.LocatedUnstructured)
 			if !ok {
-				fmt.Printf("expected object of type LocatedUnstructured, got: %#v\n", u)
+				klog.V(2).Infof("expected object of type LocatedUnstructured, got: %#v\n", u)
 				return
 			}
 			c.syncUnstructured(u, stateChan)
@@ -101,7 +103,7 @@ func (c *CueInstanceController) processClusterStateQueue(stateChan chan map[*ide
 	}
 }
 
-func (c *CueInstanceController) processCueQueue(ctx context.Context) {
+func (c *CueInstanceController) processCueQueue(ctx context.Context, errChan chan error) {
 	for {
 		if c.cueQueue.ShuttingDown() {
 			break
@@ -116,11 +118,11 @@ func (c *CueInstanceController) processCueQueue(ctx context.Context) {
 
 			label, ok := item.(string)
 			if !ok {
-				fmt.Printf("WARNING: %#v is being dropped because it is not a string\n", label)
+				klog.V(2).Infof("expected string, got: %#v\n", label)
 				c.cueQueue.Forget(label)
 				return
 			}
-			c.syncCueInstance(label, ctx.Done())
+			c.syncCueInstance(label, errChan, ctx.Done())
 		}()
 	}
 }
