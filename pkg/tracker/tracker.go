@@ -30,16 +30,18 @@ func NewLocationTracker(ensurer ensure.Interface) *LocationTracker {
 
 // Sync attempts to create an unstructured object identified by []path in instance.
 // if successful, it returns a locator that can be used to lookup the object in the cluster later.
-func (a *LocationTracker) Sync(obj *unstructured.Unstructured, path ...string) (*identity.Locator, error) {
+func (a *LocationTracker) Sync(obj *unstructured.Unstructured, path ...string) (string, *identity.Locator, error) {
+	rv := obj.GetResourceVersion()
 	_, locator, err := a.ensurer.EnsureUnstructured(obj)
 	if err != nil {
-		return nil, err
+		return "", nil, err
 	}
 	locator.Path = path
 
 	a.locators.Store(strings.Join(path, "."), &locator)
 
-	return &locator, nil
+	// this returns the _old_ RV so that we can detect when the cache no longer has this value
+	return rv, &locator, nil
 }
 
 // Locators returns the list of locators for concrete values

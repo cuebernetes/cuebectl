@@ -5,6 +5,8 @@ package controller
 
 import (
 	"context"
+	"strings"
+	"sync"
 
 	"cuelang.org/go/cue/build"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -25,6 +27,7 @@ type CueInstanceController struct {
 	informerCache          *cache.DynamicInformerCache
 	tracker                *tracker.LocationTracker
 	unifier                *unifier.ClusterUnifier
+	oldRVs                 *rvTracker
 }
 
 func NewCueInstanceController(client dynamic.Interface, mapper meta.RESTMapper, buildInstance *build.Instance) *CueInstanceController {
@@ -35,6 +38,7 @@ func NewCueInstanceController(client dynamic.Interface, mapper meta.RESTMapper, 
 		tracker:       tracker.NewLocationTracker(ensure.NewDynamicUnstructuredEnsurer(client, mapper, informerCache)),
 		unifier:       unifier.NewClusterUnifier(buildInstance, informerCache),
 		informerCache: informerCache,
+		oldRVs:        NewRvTracker(),
 	}
 }
 
@@ -46,8 +50,13 @@ func (c *CueInstanceController) Start(ctx context.Context, stateChan chan map[*i
 }
 
 func (c *CueInstanceController) syncUnstructured(u *identity.LocatedUnstructured, stateChan chan map[*identity.Locator]*unstructured.Unstructured) {
+	if rv, ok := c.oldRVs.Get(strings.Join(u.Locator.Path, "/")); ok && rv == u.GetResourceVersion() {
+		klog.V(2).Infof("cache hasn't yet caught up to recent changes")
+		return
+	}
+
 	// requeue the label associated with the object in the cue instance
-	c.cueQueue.Add(u.Locator.Path[0])
+	c.cueQueue.Add(strings.Join(u.Locator.Path, "/"))
 
 	// send back current cluster state
 	stateChan <- c.informerCache.FromCluster(c.tracker.Locators())
@@ -63,14 +72,22 @@ func (c *CueInstanceController) syncCueInstance(label string, errChan chan error
 		return
 	}
 
+	rv, ok := c.oldRVs.Get(label)
+	objrv := obj.GetResourceVersion()
+	if ok && rv == objrv {
+		klog.V(2).Infof("cache hasn't yet caught up to recent changes")
+		return
+	}
+
 	// sync value at `label` with the cluster
-	locator, err := c.tracker.Sync(obj, label)
+	oldrv, locator, err := c.tracker.Sync(obj, label)
 	if err != nil {
 		errChan <- err
 		klog.V(1).Error(err, "could not sync")
 		c.cueQueue.AddRateLimited(label)
 		return
 	}
+	c.oldRVs.Set(label, oldrv)
 
 	// start up informers for newly synced NGVRs
 	inf := c.informerCache.Get(locator.NamespacedGroupVersionResource)
@@ -128,4 +145,28 @@ func (c *CueInstanceController) processCueQueue(ctx context.Context, errChan cha
 			c.syncCueInstance(label, errChan, ctx.Done())
 		}()
 	}
+}
+
+type rvTracker struct {
+	oldResourceVersions map[string]string
+	sync.RWMutex
+}
+
+func NewRvTracker() *rvTracker {
+	return &rvTracker{
+		oldResourceVersions: map[string]string{},
+	}
+}
+
+func (t *rvTracker) Set(label, rv string) {
+	t.Lock()
+	defer t.Unlock()
+	t.oldResourceVersions[label] = rv
+}
+
+func (t *rvTracker) Get(label string) (string, bool) {
+	t.RLock()
+	defer t.RUnlock()
+	rv, ok := t.oldResourceVersions[label]
+	return rv, ok
 }
