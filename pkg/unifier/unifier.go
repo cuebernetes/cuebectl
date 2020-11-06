@@ -4,12 +4,12 @@
 package unifier
 
 import (
+	"fmt"
 	"strings"
 	"sync"
 
 	"cuelang.org/go/cue"
 	"cuelang.org/go/cue/build"
-	"github.com/pkg/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/client-go/util/workqueue"
 
@@ -75,7 +75,9 @@ func (u *ClusterUnifier) Lookup(fromCluster map[*identity.Locator]*unstructured.
 	defer u.RUnlock()
 	cueValue := instance.Lookup(path...)
 	if err := cueValue.Validate(cue.Concrete(true)); err != nil {
-		return nil, errors.WithMessagef(err, "%s not yet concrete", strings.Join(path, "/"))
+		// note: err is not safe to return over the error chan because it holds references to the instance internals.
+		// this takes the error string only and returns it
+		return nil, fmt.Errorf("%s not yet concrete: %s", strings.Join(path, "/"), err.Error())
 	}
 
 	obj := &unstructured.Unstructured{}

@@ -42,6 +42,8 @@ func (d *DynamicInformerCache) Get(ngvr identity.NamespacedGroupVersionResource)
 
 func (d *DynamicInformerCache) Add(ngvr identity.NamespacedGroupVersionResource, factory NamespacedDynamicInformerFactory, stopc <-chan struct{}) informers.GenericInformer {
 	inf := factory(d.client, ngvr)
+	// TODO use cache for gets
+	// TODO wait until cache RV == last created RV before performing more actions
 	d.informers.Store(ngvr, inf)
 	go inf.Informer().Run(stopc)
 	return inf
