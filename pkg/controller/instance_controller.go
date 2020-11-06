@@ -32,7 +32,7 @@ func NewCueInstanceController(client dynamic.Interface, mapper meta.RESTMapper, 
 	return &CueInstanceController{
 		clusterQueue:  workqueue.NewRateLimitingQueue(workqueue.DefaultControllerRateLimiter()),
 		cueQueue:      workqueue.NewRateLimitingQueue(workqueue.DefaultItemBasedRateLimiter()),
-		tracker:       tracker.NewLocationTracker(ensure.NewDynamicUnstructuredEnsurer(client, mapper)),
+		tracker:       tracker.NewLocationTracker(ensure.NewDynamicUnstructuredEnsurer(client, mapper, informerCache)),
 		unifier:       unifier.NewClusterUnifier(buildInstance, informerCache),
 		informerCache: informerCache,
 	}

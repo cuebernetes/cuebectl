@@ -42,7 +42,6 @@ func (d *DynamicInformerCache) Get(ngvr identity.NamespacedGroupVersionResource)
 
 func (d *DynamicInformerCache) Add(ngvr identity.NamespacedGroupVersionResource, factory NamespacedDynamicInformerFactory, stopc <-chan struct{}) informers.GenericInformer {
 	inf := factory(d.client, ngvr)
-	// TODO use cache for gets
 	// TODO wait until cache RV == last created RV before performing more actions
 	d.informers.Store(ngvr, inf)
 	go inf.Informer().Run(stopc)
@@ -64,15 +63,16 @@ func (d *DynamicInformerCache) FromCluster(locators []*identity.Locator) (curren
 			fetched, err = i.Lister().Get(o.Name)
 		}
 
-		// TODO: should this trigger a retry, since the unified state will be dirty?
+		// returned cluster state will be dirty, but a future sync will catch up
 		if err != nil {
-			klog.V(2).Infof("%s has been synced but not found in cache", strings.Join(o.Path, "/"))
+			klog.V(2).Infof("%s has been synced but not found in cache, cluster state is dirty", strings.Join(o.Path, "/"))
 			continue
 		}
 		u, ok := fetched.(*unstructured.Unstructured)
 		if !ok {
 			continue
 		}
+
 		current[o] = u
 	}
 

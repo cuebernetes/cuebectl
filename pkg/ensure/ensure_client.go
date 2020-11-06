@@ -13,11 +13,14 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/rand"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/klog/v2"
 
+	"github.com/cuebernetes/cuebectl/pkg/cache"
 	"github.com/cuebernetes/cuebectl/pkg/identity"
 )
 
@@ -26,16 +29,18 @@ const ObjectHashKey = "cuebectl/object-hash"
 // DynamicUnstructuredEnsurer uses a dynamic client to provide ensure.Interface
 type DynamicUnstructuredEnsurer struct {
 	client dynamic.Interface
+	cache  cache.Interface
 	mapper meta.RESTMapper
 }
 
 var _ Interface = &DynamicUnstructuredEnsurer{}
 
 // NewDynamicUnstructuredEnsurer constructs a an ensurer from a dynamic.Interface and RESTMapper
-func NewDynamicUnstructuredEnsurer(client dynamic.Interface, mapper meta.RESTMapper) *DynamicUnstructuredEnsurer {
+func NewDynamicUnstructuredEnsurer(client dynamic.Interface, mapper meta.RESTMapper, cache cache.Interface) *DynamicUnstructuredEnsurer {
 	return &DynamicUnstructuredEnsurer{
 		client: client,
 		mapper: mapper,
+		cache:  cache,
 	}
 }
 
@@ -64,7 +69,7 @@ func (e *DynamicUnstructuredEnsurer) EnsureUnstructured(in *unstructured.Unstruc
 		return
 	}
 
-	existing, err := e.client.Resource(mapping.Resource).Namespace(namespace).Get(context.TODO(), in.GetName(), v1.GetOptions{})
+	existing, err := e.get(mapping.Resource, namespace, in.GetName())
 	if errors.IsNotFound(err) {
 		// create if not exists
 		out, err = e.client.Resource(mapping.Resource).Namespace(namespace).Create(context.TODO(), in, v1.CreateOptions{FieldManager: "cuebectl"})
@@ -95,6 +100,25 @@ func (e *DynamicUnstructuredEnsurer) EnsureUnstructured(in *unstructured.Unstruc
 	force := true
 	out, err = e.client.Resource(mapping.Resource).Namespace(namespace).Patch(context.TODO(), in.GetName(), types.ApplyPatchType, b, v1.PatchOptions{FieldManager: "cuebectl", Force: &force})
 	return
+}
+
+func (e *DynamicUnstructuredEnsurer) get(resource schema.GroupVersionResource, namespace, name string) (*unstructured.Unstructured, error) {
+	ngvr := identity.NamespacedGroupVersionResource{GroupVersionResource: resource, Namespace: namespace}
+	informer := e.cache.Get(ngvr)
+	if informer == nil {
+		return e.client.Resource(resource).Namespace(namespace).Get(context.TODO(), name, v1.GetOptions{})
+	}
+	var o runtime.Object
+	var err error
+	if namespace == "" {
+		o, err = informer.Lister().Get(name)
+	} else {
+		o, err = informer.Lister().ByNamespace(namespace).Get(name)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return o.(*unstructured.Unstructured), nil
 }
 
 // HashUnstructured writes specified object to hash using the spew library
