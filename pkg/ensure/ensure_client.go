@@ -96,7 +96,7 @@ func (e *DynamicUnstructuredEnsurer) EnsureUnstructured(in *unstructured.Unstruc
 		return
 	}
 
-	// TODO: is force needed (check kube versions)
+	// TODO: can the requirement to force be removed?
 	force := true
 	out, err = e.client.Resource(mapping.Resource).Namespace(namespace).Patch(context.TODO(), in.GetName(), types.ApplyPatchType, b, v1.PatchOptions{FieldManager: "cuebectl", Force: &force})
 	return

@@ -28,6 +28,14 @@ type ClusterUnifier struct {
 	sync.RWMutex
 }
 
+func NewClusterUnifier(instance *build.Instance, informerSet cache.Interface) *ClusterUnifier {
+	return &ClusterUnifier{
+		runtime:     &cue.Runtime{},
+		instance:    instance,
+		informerSet: informerSet,
+	}
+}
+
 // unify takes the initial instance and updates the unified representation with current cluster state.
 // the cluster state is constructed from the informer cache
 func (u *ClusterUnifier) unify(fromCluster map[*identity.Locator]*unstructured.Unstructured) (instance *cue.Instance, err error) {
@@ -87,12 +95,4 @@ func (u *ClusterUnifier) Lookup(fromCluster map[*identity.Locator]*unstructured.
 	}
 
 	return obj, nil
-}
-
-func NewClusterUnifier(instance *build.Instance, informerSet cache.Interface) *ClusterUnifier {
-	return &ClusterUnifier{
-		runtime:     &cue.Runtime{},
-		instance:    instance,
-		informerSet: informerSet,
-	}
 }

@@ -24,21 +24,21 @@ import (
 
 type CueInstanceController struct {
 	clusterQueue, cueQueue workqueue.RateLimitingInterface
-	informerCache          *cache.DynamicInformerCache
-	tracker                *tracker.LocationTracker
-	unifier                *unifier.ClusterUnifier
-	oldRVs                 *rvTracker
+	informerCache          cache.Interface
+	tracker                tracker.Interface
+	unifier                unifier.Interface
+	resourceVersions       *lastResourceVersions
 }
 
 func NewCueInstanceController(client dynamic.Interface, mapper meta.RESTMapper, buildInstance *build.Instance) *CueInstanceController {
 	informerCache := cache.NewDynamicInformerCache(client)
 	return &CueInstanceController{
-		clusterQueue:  workqueue.NewRateLimitingQueue(workqueue.DefaultControllerRateLimiter()),
-		cueQueue:      workqueue.NewRateLimitingQueue(workqueue.DefaultItemBasedRateLimiter()),
-		tracker:       tracker.NewLocationTracker(ensure.NewDynamicUnstructuredEnsurer(client, mapper, informerCache)),
-		unifier:       unifier.NewClusterUnifier(buildInstance, informerCache),
-		informerCache: informerCache,
-		oldRVs:        NewRvTracker(),
+		clusterQueue:     workqueue.NewRateLimitingQueue(workqueue.DefaultControllerRateLimiter()),
+		cueQueue:         workqueue.NewRateLimitingQueue(workqueue.DefaultItemBasedRateLimiter()),
+		tracker:          tracker.NewLocationTracker(ensure.NewDynamicUnstructuredEnsurer(client, mapper, informerCache)),
+		unifier:          unifier.NewClusterUnifier(buildInstance, informerCache),
+		informerCache:    informerCache,
+		resourceVersions: NewLastResourceVersions(),
 	}
 }
 
@@ -50,7 +50,7 @@ func (c *CueInstanceController) Start(ctx context.Context, stateChan chan map[*i
 }
 
 func (c *CueInstanceController) syncUnstructured(u *identity.LocatedUnstructured, stateChan chan map[*identity.Locator]*unstructured.Unstructured) {
-	if rv, ok := c.oldRVs.Get(strings.Join(u.Locator.Path, "/")); ok && rv == u.GetResourceVersion() {
+	if rv, ok := c.resourceVersions.Get(strings.Join(u.Locator.Path, "/")); ok && rv == u.GetResourceVersion() {
 		klog.V(2).Infof("cache hasn't yet caught up to recent changes")
 		return
 	}
@@ -72,7 +72,7 @@ func (c *CueInstanceController) syncCueInstance(label string, errChan chan error
 		return
 	}
 
-	rv, ok := c.oldRVs.Get(label)
+	rv, ok := c.resourceVersions.Get(label)
 	objrv := obj.GetResourceVersion()
 	if ok && rv == objrv {
 		klog.V(2).Infof("cache hasn't yet caught up to recent changes")
@@ -87,7 +87,7 @@ func (c *CueInstanceController) syncCueInstance(label string, errChan chan error
 		c.cueQueue.AddRateLimited(label)
 		return
 	}
-	c.oldRVs.Set(label, oldrv)
+	c.resourceVersions.Set(label, oldrv)
 
 	// start up informers for newly synced NGVRs
 	inf := c.informerCache.Get(locator.NamespacedGroupVersionResource)
@@ -147,24 +147,24 @@ func (c *CueInstanceController) processCueQueue(ctx context.Context, errChan cha
 	}
 }
 
-type rvTracker struct {
+type lastResourceVersions struct {
 	oldResourceVersions map[string]string
 	sync.RWMutex
 }
 
-func NewRvTracker() *rvTracker {
-	return &rvTracker{
+func NewLastResourceVersions() *lastResourceVersions {
+	return &lastResourceVersions{
 		oldResourceVersions: map[string]string{},
 	}
 }
 
-func (t *rvTracker) Set(label, rv string) {
+func (t *lastResourceVersions) Set(label, rv string) {
 	t.Lock()
 	defer t.Unlock()
 	t.oldResourceVersions[label] = rv
 }
 
-func (t *rvTracker) Get(label string) (string, bool) {
+func (t *lastResourceVersions) Get(label string) (string, bool) {
 	t.RLock()
 	defer t.RUnlock()
 	rv, ok := t.oldResourceVersions[label]
