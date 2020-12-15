@@ -4,21 +4,16 @@
 package cmd
 
 import (
-	"context"
 	"fmt"
-	"strings"
 
-	"cuelang.org/go/cue/load"
 	"github.com/spf13/cobra"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/cli-runtime/pkg/genericclioptions"
 	"k8s.io/cli-runtime/pkg/resource"
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 	cmdutil "k8s.io/kubectl/pkg/cmd/util"
 	"k8s.io/kubectl/pkg/util/templates"
 
-	"github.com/cuebernetes/cuebectl/pkg/controller"
-	"github.com/cuebernetes/cuebectl/pkg/identity"
+	"github.com/cuebernetes/cuebectl/pkg/apply"
 	"github.com/cuebernetes/cuebectl/pkg/signals"
 )
 
@@ -111,53 +106,5 @@ func (o *ApplyOptions) Run(f cmdutil.Factory, cmd *cobra.Command, args []string)
 	if err != nil {
 		return err
 	}
-
-	is := load.Instances([]string{"."}, &load.Config{
-		Dir: args[0],
-	})
-	if len(is) > 1 {
-		return fmt.Errorf("multiple instance loading currently not supported")
-	}
-	if len(is) < 1 {
-		return fmt.Errorf("no instances found")
-	}
-	cueInstanceController := controller.NewCueInstanceController(client, mapper, is[0])
-	stateChan := make(chan map[*identity.Locator]*unstructured.Unstructured)
-	errChan := make(chan error)
-
-	ctx, cancel := context.WithCancel(signals.Context())
-	defer cancel()
-	count, err := cueInstanceController.Start(ctx, stateChan, errChan)
-	if err != nil {
-		return err
-	}
-
-	printed := map[string]struct{}{}
-	for {
-		select {
-		case current := <-stateChan:
-			if !o.Watch && count == len(current) {
-				cancel()
-			}
-			for l, u := range current {
-				path := strings.Join(l.Path, "/")
-				if _, ok := printed[path]; ok {
-					continue
-				}
-				printed[path] = struct{}{}
-				if _, err := fmt.Fprintf(o.IOStreams.Out,
-					"created %s: %s/%s (%s)\n",
-					path, u.GetNamespace(), u.GetName(), u.GroupVersionKind()); err != nil {
-					return err
-				}
-			}
-		case err := <-errChan:
-			if _, err := fmt.Fprintln(o.IOStreams.Out, err); err != nil {
-				return err
-			}
-		case <-ctx.Done():
-			return nil
-		default:
-		}
-	}
+	return apply.CueDir(signals.Context(), o.IOStreams.Out, client, mapper, args[0], o.Watch)
 }
