@@ -11,39 +11,39 @@ import (
 
 	"cuelang.org/go/cue/load"
 	"k8s.io/apimachinery/pkg/api/meta"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/client-go/dynamic"
 
 	"github.com/cuebernetes/cuebectl/pkg/controller"
-	"github.com/cuebernetes/cuebectl/pkg/identity"
 )
 
-func CueDir(ctx context.Context, out io.Writer, client dynamic.Interface, mapper meta.RESTMapper, path string, keepalive bool) error {
+func CueDir(ctx context.Context, out io.Writer, client dynamic.Interface, mapper meta.RESTMapper, path string, watch bool) (*controller.ClusterState, error) {
 	is := load.Instances([]string{"."}, &load.Config{
 		Dir: path,
 	})
 	if len(is) > 1 {
-		return fmt.Errorf("multiple instance loading currently not supported")
+		return nil, fmt.Errorf("multiple instance loading currently not supported")
 	}
 	if len(is) < 1 {
-		return fmt.Errorf("no instances found")
+		return nil, fmt.Errorf("no instances found")
 	}
 	cueInstanceController := controller.NewCueInstanceController(client, mapper, is[0])
-	stateChan := make(chan map[*identity.Locator]*unstructured.Unstructured)
+	stateChan := make(chan controller.ClusterState)
 	errChan := make(chan error)
 
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	count, err := cueInstanceController.Start(ctx, stateChan, errChan)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
+	var lastState *controller.ClusterState
 	printed := map[string]struct{}{}
 	for {
 		select {
 		case current := <-stateChan:
-			if !keepalive && count == len(current) {
+			lastState = &current
+			if !watch && count == len(current) {
 				cancel()
 			}
 			for l, u := range current {
@@ -55,15 +55,15 @@ func CueDir(ctx context.Context, out io.Writer, client dynamic.Interface, mapper
 				if _, err := fmt.Fprintf(out,
 					"created %s: %s/%s (%s)\n",
 					path, u.GetNamespace(), u.GetName(), u.GroupVersionKind()); err != nil {
-					return err
+					return nil, err
 				}
 			}
 		case err := <-errChan:
 			if _, err := fmt.Fprintln(out, err); err != nil {
-				return err
+				return nil, err
 			}
 		case <-ctx.Done():
-			return nil
+			return lastState, nil
 		default:
 		}
 	}

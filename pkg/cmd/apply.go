@@ -106,5 +106,6 @@ func (o *ApplyOptions) Run(f cmdutil.Factory, cmd *cobra.Command, args []string)
 	if err != nil {
 		return err
 	}
-	return apply.CueDir(signals.Context(), o.IOStreams.Out, client, mapper, args[0], o.Watch)
+	_, err = apply.CueDir(signals.Context(), o.IOStreams.Out, client, mapper, args[0], o.Watch)
+	return err
 }

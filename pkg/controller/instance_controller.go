@@ -22,6 +22,16 @@ import (
 	"github.com/cuebernetes/cuebectl/pkg/unifier"
 )
 
+type ClusterState map[*identity.Locator]*unstructured.Unstructured
+
+func (c ClusterState) Locators() []identity.Locator {
+	locators := make([]identity.Locator, 0)
+	for l := range c {
+		locators = append(locators, *l)
+	}
+	return locators
+}
+
 type CueInstanceController struct {
 	clusterQueue, cueQueue workqueue.RateLimitingInterface
 	informerCache          cache.Interface
@@ -42,14 +52,14 @@ func NewCueInstanceController(client dynamic.Interface, mapper meta.RESTMapper, 
 	}
 }
 
-func (c *CueInstanceController) Start(ctx context.Context, stateChan chan map[*identity.Locator]*unstructured.Unstructured, errChan chan error) (count int, err error) {
+func (c *CueInstanceController) Start(ctx context.Context, stateChan chan ClusterState, errChan chan error) (count int, err error) {
 	count, err = c.unifier.Fill(c.cueQueue)
 	go c.processClusterStateQueue(stateChan)
 	go c.processCueQueue(ctx, errChan)
 	return
 }
 
-func (c *CueInstanceController) syncUnstructured(u *identity.LocatedUnstructured, stateChan chan map[*identity.Locator]*unstructured.Unstructured) {
+func (c *CueInstanceController) syncUnstructured(u *identity.LocatedUnstructured, stateChan chan ClusterState) {
 	if rv, ok := c.resourceVersions.Get(strings.Join(u.Locator.Path, "/")); ok && rv == u.GetResourceVersion() {
 		klog.V(2).Infof("cache hasn't yet caught up to recent changes")
 		return
@@ -100,7 +110,7 @@ func (c *CueInstanceController) syncCueInstance(label string, errChan chan error
 	c.cueQueue.Forget(label)
 }
 
-func (c *CueInstanceController) processClusterStateQueue(stateChan chan map[*identity.Locator]*unstructured.Unstructured) {
+func (c *CueInstanceController) processClusterStateQueue(stateChan chan ClusterState) {
 	for {
 		if c.clusterQueue.ShuttingDown() {
 			return
