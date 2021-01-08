@@ -15,6 +15,8 @@
 package subsume
 
 import (
+	"fmt"
+
 	"cuelang.org/go/internal/core/adt"
 	"cuelang.org/go/internal/core/export"
 )
@@ -31,11 +33,10 @@ func (s *subsumer) vertices(x, y *adt.Vertex) bool {
 	}
 
 	if s.Defaults {
-		x = x.Default()
 		y = y.Default()
 	}
 
-	if b, _ := y.Value.(*adt.Bottom); b != nil {
+	if b, _ := y.BaseValue.(*adt.Bottom); b != nil {
 		// If the value is incomplete, the error is not final. So either check
 		// structural equivalence or return an error.
 		return !b.IsIncomplete()
@@ -45,7 +46,7 @@ func (s *subsumer) vertices(x, y *adt.Vertex) bool {
 
 	final := y.IsData() || s.Final
 
-	switch v := x.Value.(type) {
+	switch v := x.BaseValue.(type) {
 	case *adt.Bottom:
 		return false
 
@@ -61,13 +62,13 @@ func (s *subsumer) vertices(x, y *adt.Vertex) bool {
 		return true
 
 	case *adt.StructMarker:
-		_, ok := y.Value.(*adt.StructMarker)
+		_, ok := y.BaseValue.(*adt.StructMarker)
 		if !ok {
 			return false
 		}
 
-	default:
-		if !s.values(v, y.Value) {
+	case adt.Value:
+		if !s.values(v, y.Value()) {
 			return false
 		}
 
@@ -75,10 +76,16 @@ func (s *subsumer) vertices(x, y *adt.Vertex) bool {
 		if final {
 			return true
 		}
+
+	default:
+		panic(fmt.Sprintf("unexpected type %T", v))
 	}
 
 	xClosed := x.IsClosed(ctx) && !s.IgnoreClosedness
-	yClosed := y.IsClosed(ctx) && !s.IgnoreClosedness
+	// TODO: this should not close for taking defaults. Do a more principled
+	// makeover of this package before making it public, though.
+	yClosed := s.Final || s.Defaults ||
+		(y.IsClosed(ctx) && !s.IgnoreClosedness)
 
 	if xClosed && !yClosed && !final {
 		return false
@@ -228,7 +235,7 @@ func (s *subsumer) listVertices(x, y *adt.Vertex) bool {
 	case x.IsClosed(ctx):
 		return false
 	default:
-		a := &adt.Vertex{Label: adt.InvalidLabel}
+		a := &adt.Vertex{Label: 0}
 		x.MatchAndInsert(ctx, a)
 		a.Finalize(ctx)
 

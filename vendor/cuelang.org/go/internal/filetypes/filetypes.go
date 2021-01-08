@@ -72,8 +72,32 @@ type FileInfo struct {
 // Encoding must be specified.
 // TODO: mode should probably not be necessary here.
 func FromFile(b *build.File, mode Mode) (*FileInfo, error) {
+	// Handle common case. This allows certain test cases to be analyzed in
+	// isolation without interference from evaluating these files.
+	if mode == Input &&
+		b.Encoding == build.CUE &&
+		b.Form == build.Schema &&
+		b.Interpretation == "" {
+		return &FileInfo{
+			File: b,
+
+			Definitions:  true,
+			Data:         true,
+			Optional:     true,
+			Constraints:  true,
+			References:   true,
+			Cycles:       true,
+			KeepDefaults: true,
+			Incomplete:   true,
+			Imports:      true,
+			Stream:       true,
+			Docs:         true,
+			Attributes:   true,
+		}, nil
+	}
+
 	i := cuegenInstance.Value()
-	i = i.Unify(i.Lookup("modes", mode.String()))
+	i, errs := update(nil, i, i, "modes", mode.String())
 	v := i.LookupDef("FileInfo")
 	v = v.Fill(b)
 
@@ -86,25 +110,34 @@ func FromFile(b *build.File, mode Mode) (*FileInfo, error) {
 
 	interpretation, _ := v.Lookup("interpretation").String()
 	if b.Form != "" {
-		v = v.Unify(i.Lookup("forms", string(b.Form)))
+		v, errs = update(errs, v, i, "forms", string(b.Form))
 		// may leave some encoding-dependent options open in data mode.
 	} else if interpretation != "" {
 		// always sets schema form.
-		v = v.Unify(i.Lookup("interpretations", interpretation))
+		v, errs = update(errs, v, i, "interpretations", interpretation)
 	}
 	if interpretation == "" {
 		s, err := v.Lookup("encoding").String()
 		if err != nil {
 			return nil, err
 		}
-		v = v.Unify(i.Lookup("encodings", s))
+		v, errs = update(errs, v, i, "encodings", s)
 	}
 
 	fi := &FileInfo{}
 	if err := v.Decode(fi); err != nil {
-		return nil, err
+		return nil, errors.Wrapf(err, token.NoPos, "could not parse arguments")
 	}
-	return fi, nil
+	return fi, errs
+}
+
+func update(errs errors.Error, v, i cue.Value, field, value string) (cue.Value, errors.Error) {
+	v = v.Unify(i.Lookup(field, value))
+	if err := v.Err(); err != nil {
+		errs = errors.Append(errs,
+			errors.Newf(token.NoPos, "unknown %s %s", field, value))
+	}
+	return v, errs
 }
 
 // ParseArgs converts a sequence of command line arguments representing
@@ -125,7 +158,7 @@ func FromFile(b *build.File, mode Mode) (*FileInfo, error) {
 //     json: foo.data bar.data json+schema: bar.schema
 //
 func ParseArgs(args []string) (files []*build.File, err error) {
-	inst, v := parseType("", Input)
+	var inst, v cue.Value
 
 	qualifier := ""
 	hasFiles := false
@@ -134,6 +167,19 @@ func ParseArgs(args []string) (files []*build.File, err error) {
 		a := strings.Split(s, ":")
 		switch {
 		case len(a) == 1 || len(a[0]) == 1: // filename
+			if !v.Exists() {
+				if len(a) == 1 && strings.HasSuffix(a[0], ".cue") {
+					// Handle majority case.
+					files = append(files, &build.File{
+						Filename: a[0],
+						Encoding: build.CUE,
+						Form:     build.Schema,
+					})
+					hasFiles = true
+					continue
+				}
+				inst, v = parseType("", Input)
+			}
 			f, err := toFile(inst, v, s)
 			if err != nil {
 				return nil, err
@@ -208,6 +254,10 @@ func toFile(i, v cue.Value, filename string) (*build.File, error) {
 		} else if ext := filepath.Ext(filename); ext != "" {
 			if x := i.Lookup("extensions", ext); x.Exists() || !hasDefault {
 				v = v.Unify(x)
+				if err := v.Err(); err != nil {
+					return nil, errors.Newf(token.NoPos,
+						"unknown file extension %s", ext)
+				}
 			}
 		} else if !hasDefault {
 			return nil, errors.Newf(token.NoPos,
@@ -217,7 +267,8 @@ func toFile(i, v cue.Value, filename string) (*build.File, error) {
 
 	f := &build.File{}
 	if err := v.Decode(&f); err != nil {
-		return nil, err
+		return nil, errors.Wrapf(err, token.NoPos,
+			"could not determine file type")
 	}
 	return f, nil
 }

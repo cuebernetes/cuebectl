@@ -16,6 +16,7 @@ package adt
 
 import (
 	"fmt"
+	"os"
 	"reflect"
 	"regexp"
 
@@ -27,6 +28,36 @@ import (
 	"cuelang.org/go/cue/format"
 	"cuelang.org/go/cue/token"
 )
+
+// Debug sets whether extra aggressive checking should be done.
+// This should typically default to true for pre-releases and default to
+// false otherwise.
+var Debug bool = os.Getenv("CUE_DEBUG") != "0"
+
+// Assert panics if the condition is false. Assert can be used to check for
+// conditions that are considers to break an internal variant or unexpected
+// condition, but that nonetheless probably will be handled correctly down the
+// line. For instance, a faulty condition could lead to to error being caught
+// down the road, but resulting in an inaccurate error message. In production
+// code it is better to deal with the bad error message than to panic.
+//
+// It is advisable for each use of Assert to document how the error is expected
+// to be handled down the line.
+func Assertf(b bool, format string, args ...interface{}) {
+	if Debug && !b {
+		panic(fmt.Sprintf("assertion failed: "+format, args...))
+	}
+}
+
+// Assertf either panics or reports an error to c if the condition is not met.
+func (c *OpContext) Assertf(pos token.Pos, b bool, format string, args ...interface{}) {
+	if !b {
+		if Debug {
+			panic(fmt.Sprintf("assertion failed: "+format, args...))
+		}
+		c.addErrf(0, pos, format, args...)
+	}
+}
 
 // A Unifier implements a strategy for CUE's unification operation. It must
 // handle the following aspects of CUE evaluation:
@@ -156,11 +187,17 @@ func (c *OpContext) pos() token.Pos {
 	return c.src.Pos()
 }
 
-func (c *OpContext) spawn(node *Vertex) *OpContext {
-	sub := *c
-	node.Parent = c.e.Vertex
-	sub.e = &Environment{Up: c.e, Vertex: node}
-	return &sub
+func (c *OpContext) spawn(node *Vertex) *Environment {
+	node.Parent = c.e.Vertex // TODO: Is this necessary?
+	return &Environment{
+		Up:     c.e,
+		Vertex: node,
+
+		// Copy cycle data.
+		Cyclic: c.e.Cyclic,
+		Deref:  c.e.Deref,
+		Cycles: c.e.Cycles,
+	}
 }
 
 func (c *OpContext) Env(upCount int32) *Environment {
@@ -189,10 +226,11 @@ func (c *OpContext) relLabel(upCount int32) Feature {
 	return e.DynamicLabel
 }
 
-func (c *OpContext) concreteIsPossible(x Expr) bool {
+func (c *OpContext) concreteIsPossible(op Op, x Expr) bool {
 	if v, ok := x.(Value); ok {
 		if v.Concreteness() > Concrete {
-			c.AddErrf("value can never become concrete")
+			c.AddErrf("invalid operand %s ('%s' requires concrete value)",
+				c.Str(x), op)
 			return false
 		}
 	}
@@ -229,7 +267,7 @@ func (c *OpContext) addErrf(code ErrorCode, pos token.Pos, msg string, args ...i
 }
 
 func (c *OpContext) addErr(code ErrorCode, err errors.Error) {
-	c.errs = CombineErrors(c.src, c.errs, &Bottom{Code: code, Err: err})
+	c.AddBottom(&Bottom{Code: code, Err: err})
 }
 
 // AddBottom records an error in OpContext.
@@ -240,7 +278,7 @@ func (c *OpContext) AddBottom(b *Bottom) {
 // AddErr records an error in OpContext. It returns errors collected so far.
 func (c *OpContext) AddErr(err errors.Error) *Bottom {
 	if err != nil {
-		c.errs = CombineErrors(c.src, c.errs, &Bottom{Err: err})
+		c.AddBottom(&Bottom{Err: err})
 	}
 	return c.errs
 }
@@ -328,6 +366,18 @@ func (c *OpContext) Resolve(env *Environment, r Resolver) (*Vertex, *Bottom) {
 		return nil, err
 	}
 
+	if arc.ChildErrors != nil && arc.ChildErrors.Code == StructuralCycleError {
+		return nil, arc.ChildErrors
+	}
+
+	for {
+		x, ok := arc.BaseValue.(*Vertex)
+		if !ok {
+			break
+		}
+		arc = x
+	}
+
 	return arc, err
 }
 
@@ -371,6 +421,7 @@ func (c *OpContext) Concrete(env *Environment, x Expr, msg interface{}) (result 
 	if !ok {
 		return v, false
 	}
+	v = Unwrap(v)
 
 	if !IsConcrete(v) {
 		complete = false
@@ -386,6 +437,10 @@ func (c *OpContext) Concrete(env *Environment, x Expr, msg interface{}) (result 
 	return v, true
 }
 
+// getDefault resolves a disjunction to a single value. If there is no default
+// value, or if there is more than one default value, it reports an "incomplete"
+// error and return false. In all other cases it will return true, even if
+// v is already an error. v may be nil, in which case it will also return nil.
 func (c *OpContext) getDefault(v Value) (result Value, ok bool) {
 	var d *Disjunction
 	switch x := v.(type) {
@@ -393,15 +448,16 @@ func (c *OpContext) getDefault(v Value) (result Value, ok bool) {
 		return v, true
 
 	case *Vertex:
-		switch t := x.Value.(type) {
+		// TODO: return vertex if not disjunction.
+		switch t := x.BaseValue.(type) {
 		case *Disjunction:
 			d = t
 
-		case *StructMarker, *ListMarker:
-			return v, true
+		case *Vertex:
+			return c.getDefault(t)
 
 		default:
-			return t, true
+			return x, true
 		}
 
 	case *Disjunction:
@@ -454,11 +510,13 @@ func (c *OpContext) value(x Expr) (result Value) {
 	v := c.evalState(x, Partial)
 
 	v, _ = c.getDefault(v)
+	v = Unwrap(v)
 	return v
 }
 
-func (c *OpContext) eval(v Expr) (result Value) {
-	return c.evalState(v, Partial)
+func (c *OpContext) eval(x Expr) (result Value) {
+	v := c.evalState(x, Partial)
+	return v
 }
 
 func (c *OpContext) evalState(v Expr, state VertexStatus) (result Value) {
@@ -469,6 +527,15 @@ func (c *OpContext) evalState(v Expr, state VertexStatus) (result Value) {
 
 	defer func() {
 		c.errs = CombineErrors(c.src, c.errs, err)
+		// TODO: remove this when we handle errors more principally.
+		if b, ok := result.(*Bottom); ok && c.src != nil &&
+			b.Code == CycleError &&
+			b.Err.Position() == token.NoPos &&
+			len(b.Err.InputPositions()) == 0 {
+			bb := *b
+			bb.Err = errors.Wrapf(b.Err, c.src.Pos(), "")
+			result = &bb
+		}
 		c.errs = CombineErrors(c.src, c.errs, result)
 		if c.errs != nil {
 			result = c.errs
@@ -491,7 +558,7 @@ func (c *OpContext) evalState(v Expr, state VertexStatus) (result Value) {
 		}
 		if isIncomplete(arc) {
 			if arc != nil {
-				return arc.Value
+				return arc.Value() // *Bottom
 			}
 			return nil
 		}
@@ -500,10 +567,9 @@ func (c *OpContext) evalState(v Expr, state VertexStatus) (result Value) {
 		return v
 
 	default:
-		// return nil
-		c.AddErrf("unexpected Expr type %T", v)
+		// This can only happen, really, if v == nil, which is not allowed.
+		panic(fmt.Sprintf("unexpected Expr type %T", v))
 	}
-	return nil
 }
 
 func (c *OpContext) lookup(x *Vertex, pos token.Pos, l Feature) *Vertex {
@@ -513,18 +579,18 @@ func (c *OpContext) lookup(x *Vertex, pos token.Pos, l Feature) *Vertex {
 		return &Vertex{}
 	}
 
-	var kind Kind
-	if x.Value != nil {
-		kind = x.Value.Kind()
-	}
+	// var kind Kind
+	// if x.BaseValue != nil {
+	// 	kind = x.BaseValue.Kind()
+	// }
 
-	switch kind {
-	case StructKind:
+	switch x.BaseValue.(type) {
+	case *StructMarker:
 		if l.Typ() == IntLabel {
 			c.addErrf(0, pos, "invalid struct selector %s (type int)", l)
 		}
 
-	case ListKind:
+	case *ListMarker:
 		switch {
 		case l.Typ() == IntLabel:
 			switch {
@@ -543,11 +609,24 @@ func (c *OpContext) lookup(x *Vertex, pos token.Pos, l Feature) *Vertex {
 			return nil
 		}
 
+	case nil:
+		// c.addErrf(IncompleteError, pos, "incomplete value %s", c.Str(x))
+		// return nil
+
+	case *Bottom:
+
 	default:
-		// TODO: ?
-		// if !l.IsDef() {
-		// 	c.addErrf(0, nil, "invalid selector %s (must be definition for non-structs)", l)
-		// }
+		kind := x.BaseValue.Kind()
+		if kind&(ListKind|StructKind) != 0 {
+			// c.addErrf(IncompleteError, pos,
+			// 	"cannot look up %s in incomplete type %s (type %s)",
+			// 	l, x.Source(), kind)
+			// return nil
+		} else if !l.IsDef() && !l.IsHidden() {
+			c.addErrf(0, pos,
+				"invalid selector %s for value of type %s", l, kind)
+			return nil
+		}
 	}
 
 	a := x.Lookup(l)
@@ -559,13 +638,26 @@ func (c *OpContext) lookup(x *Vertex, pos token.Pos, l Feature) *Vertex {
 		// TODO: if the struct was a literal struct, we can also treat it as
 		// closed and make this a permanent error.
 		label := l.SelectorString(c.Runtime)
-		c.addErrf(code, pos, "undefined field %s", label)
+
+		// TODO(errors): add path reference and make message
+		//       "undefined field %s in %s"
+		if l.IsInt() {
+			c.addErrf(code, pos, "index out of range [%d] with length %d",
+				l.Index(), len(x.Elems()))
+		} else {
+			if code != 0 && x.Closed != nil && x.Closed.IsOptional(l) {
+				c.addErrf(code, pos,
+					"cannot reference optional field %s", label)
+			} else {
+				c.addErrf(code, pos, "undefined field %s", label)
+			}
+		}
 	}
 	return a
 }
 
-func (c *OpContext) Label(x Value) Feature {
-	return labelFromValue(c, x)
+func (c *OpContext) Label(src Expr, x Value) Feature {
+	return labelFromValue(c, src, x)
 }
 
 func (c *OpContext) typeError(v Value, k Kind) {
@@ -606,38 +698,72 @@ func pos(x Node) token.Pos {
 	return x.Source().Pos()
 }
 
-func (c *OpContext) node(x Expr, state VertexStatus) *Vertex {
-	v := c.evalState(x, state)
+func (c *OpContext) node(orig Node, x Expr, scalar bool) *Vertex {
+	// TODO: always get the vertex. This allows a whole bunch of trickery
+	// down the line.
+	v := c.evalState(x, EvaluatingArcs)
 
 	v, ok := c.getDefault(v)
 	if !ok {
 		// Error already generated by getDefault.
 		return emptyNode
 	}
+	if scalar {
+		v = Unwrap(v)
+	}
 
 	node, ok := v.(*Vertex)
-	if !ok {
-		if isError(v) {
-			if v == nil {
-				c.addErrf(IncompleteError, pos(x), "incomplete value %s", c.Str(x))
-				return emptyNode
-			}
-		}
-		if v.Kind()&StructKind != 0 {
+	if ok {
+		v = node.Value()
+	}
+	switch nv := v.(type) {
+	case nil:
+		switch orig.(type) {
+		case *ForClause:
 			c.addErrf(IncompleteError, pos(x),
-				"incomplete feed source value %s (type %s)",
-				x.Source(), v.Kind())
-		} else if b, ok := v.(*Bottom); ok {
-			c.AddBottom(b)
-		} else {
+				"cannot range over %s (incomplete)",
+				c.Str(x))
+		default:
+			c.addErrf(IncompleteError, pos(x),
+				"%s undefined (%s is incomplete)", c.Str(orig), c.Str(x))
+		}
+		return emptyNode
+
+	case *Bottom:
+		// TODO: this is a bit messy. In some cases errors are already added
+		// and in some cases not. Not a huge deal, as errors will be uniqued
+		// down the line, but could be better.
+		c.AddBottom(nv)
+		return emptyNode
+
+	case *Vertex:
+		if node == nil {
+			panic("unexpected markers with nil node")
+		}
+
+	default:
+		if kind := v.Kind(); kind&StructKind != 0 {
+			switch orig.(type) {
+			case *ForClause:
+				c.addErrf(IncompleteError, pos(x),
+					"cannot range over %s (incomplete type %s)",
+					c.Str(x), kind)
+			default:
+				c.addErrf(IncompleteError, pos(x),
+					"%s undefined as %s is incomplete (type %s)",
+					c.Str(orig), c.Str(x), kind)
+			}
+			return emptyNode
+
+		} else if !ok {
 			c.addErrf(0, pos(x), // TODO(error): better message.
 				"invalid operand %s (found %s, want list or struct)",
 				x.Source(), v.Kind())
-
+			return emptyNode
 		}
-		return emptyNode
 	}
-	return node.Default()
+
+	return node
 }
 
 // Elems returns the elements of a list.
@@ -667,7 +793,7 @@ func (c *OpContext) scalar(v Value) Value {
 
 var zero = &Num{K: NumKind}
 
-func (c *OpContext) num(v Value, as interface{}) *Num {
+func (c *OpContext) Num(v Value, as interface{}) *Num {
 	v = Unwrap(v)
 	if isError(v) {
 		return zero
@@ -857,6 +983,8 @@ func (c *OpContext) regexp(v Value) *regexp.Regexp {
 	}
 }
 
+// newNum creates a new number of the given kind. It reports an error value
+// instead if any error occurred.
 func (c *OpContext) newNum(d *apd.Decimal, k Kind, sources ...Node) Value {
 	if c.HasErr() {
 		return c.Err()
@@ -894,7 +1022,7 @@ func (c *OpContext) newBool(b bool) Value {
 }
 
 func (c *OpContext) newList(src ast.Node, parent *Vertex) *Vertex {
-	return &Vertex{Parent: parent, Value: &ListMarker{}}
+	return &Vertex{Parent: parent, BaseValue: &ListMarker{}}
 }
 
 // Str reports a debug string of x.

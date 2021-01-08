@@ -35,10 +35,9 @@ type fieldSet struct {
 	// Required fields are marked as empty
 	fields []field
 
-	// literal map[adt.Feature][]adt.Node
-
 	// excluded are all literal fields that already exist.
-	bulk       []bulkField
+	bulk []bulkField
+
 	additional []adt.Expr
 	isOpen     bool // has a ...
 }
@@ -66,14 +65,24 @@ func (o *fieldSet) OptionalTypes() (mask adt.OptionalType) {
 	return mask
 }
 
+func (o *fieldSet) IsOptional(label adt.Feature) bool {
+	for _, f := range o.fields {
+		if f.label == label && len(f.optional) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
 type field struct {
 	label    adt.Feature
 	optional []adt.Node
 }
 
 type bulkField struct {
-	check fieldMatcher
-	expr  adt.Node // *adt.BulkOptionalField // Conjunct
+	check      fieldMatcher
+	expr       adt.Node // *adt.BulkOptionalField // Conjunct
+	additional bool     // used with ...
 }
 
 func (o *fieldSet) Accept(c *adt.OpContext, f adt.Feature) bool {
@@ -98,17 +107,16 @@ func (o *fieldSet) MatchAndInsert(c *adt.OpContext, arc *adt.Vertex) {
 	env := o.env
 
 	// Match normal fields
-	p := 0
-	for ; p < len(o.fields); p++ {
-		if o.fields[p].label == arc.Label {
-			break
+	matched := false
+outer:
+	for _, f := range o.fields {
+		if f.label == arc.Label {
+			for _, e := range f.optional {
+				arc.AddConjunct(adt.MakeConjunct(env, e, o.id))
+			}
+			matched = true
+			break outer
 		}
-	}
-	if p < len(o.fields) {
-		for _, e := range o.fields[p].optional {
-			arc.AddConjunct(adt.MakeConjunct(env, e, o.id))
-		}
-		return
 	}
 
 	if !arc.Label.IsRegular() {
@@ -117,10 +125,14 @@ func (o *fieldSet) MatchAndInsert(c *adt.OpContext, arc *adt.Vertex) {
 
 	bulkEnv := *env
 	bulkEnv.DynamicLabel = arc.Label
+	bulkEnv.Deref = nil
+	bulkEnv.Cycles = nil
 
 	// match bulk optional fields / pattern properties
-	matched := false
 	for _, f := range o.bulk {
+		if matched && f.additional {
+			continue
+		}
 		if f.check.Match(c, arc.Label) {
 			matched = true
 			if f.expr != nil {
@@ -132,9 +144,13 @@ func (o *fieldSet) MatchAndInsert(c *adt.OpContext, arc *adt.Vertex) {
 		return
 	}
 
+	addEnv := *env
+	addEnv.Deref = nil
+	addEnv.Cycles = nil
+
 	// match others
 	for _, x := range o.additional {
-		arc.AddConjunct(adt.MakeConjunct(env, x, o.id))
+		arc.AddConjunct(adt.MakeConjunct(&addEnv, x, o.id))
 	}
 }
 
@@ -147,9 +163,9 @@ func (o *fieldSet) fieldIndex(f adt.Feature) int {
 	return -1
 }
 
-func (o *fieldSet) MarkField(c *adt.OpContext, x *adt.Field) {
-	if o.fieldIndex(x.Label) < 0 {
-		o.fields = append(o.fields, field{label: x.Label})
+func (o *fieldSet) MarkField(c *adt.OpContext, f adt.Feature) {
+	if o.fieldIndex(f) < 0 {
+		o.fields = append(o.fields, field{label: f})
 	}
 }
 
@@ -164,7 +180,7 @@ func (o *fieldSet) AddOptional(c *adt.OpContext, x *adt.OptionalField) {
 
 func (o *fieldSet) AddDynamic(c *adt.OpContext, env *adt.Environment, x *adt.DynamicField) {
 	// not in bulk: count as regular field?
-	o.bulk = append(o.bulk, bulkField{dynamicMatcher{env, x.Key}, nil})
+	o.bulk = append(o.bulk, bulkField{dynamicMatcher{env, x.Key}, nil, false})
 }
 
 func (o *fieldSet) AddBulk(c *adt.OpContext, x *adt.BulkOptionalField) {
@@ -175,7 +191,7 @@ func (o *fieldSet) AddBulk(c *adt.OpContext, x *adt.BulkOptionalField) {
 	}
 
 	if m := o.getMatcher(c, v); m != nil {
-		o.bulk = append(o.bulk, bulkField{m, x})
+		o.bulk = append(o.bulk, bulkField{m, x, false})
 	}
 }
 
@@ -235,7 +251,8 @@ func (m dynamicMatcher) Match(c *adt.OpContext, f adt.Feature) bool {
 	if !ok {
 		return false
 	}
-	return f.SelectorString(c) == s.Str
+	label := f.StringValue(c)
+	return label == s.Str
 }
 
 type patternMatcher adt.Conjunct
@@ -246,7 +263,7 @@ func (m patternMatcher) Match(c *adt.OpContext, f adt.Feature) bool {
 	label := f.ToValue(c)
 	v.AddConjunct(adt.MakeRootConjunct(m.Env, label))
 	v.Finalize(c)
-	b, _ := v.Value.(*adt.Bottom)
+	b, _ := v.BaseValue.(*adt.Bottom)
 	return b == nil
 }
 

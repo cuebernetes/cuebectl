@@ -24,20 +24,18 @@ import (
 )
 
 func (e *exporter) stringLabel(f adt.Feature) ast.Label {
-	if f == 0 {
-		return ast.NewIdent("_")
-	}
 	x := f.Index()
 	switch f.Typ() {
 	case adt.IntLabel:
 		return ast.NewLit(token.INT, strconv.Itoa(int(x)))
 
 	case adt.DefinitionLabel, adt.HiddenLabel, adt.HiddenDefinitionLabel:
-		return ast.NewIdent(e.ctx.IndexToString(int64(x)))
+		s := f.IdentString(e.ctx)
+		return ast.NewIdent(s)
 
 	case adt.StringLabel:
 		s := e.ctx.IndexToString(int64(x))
-		if !ast.IsValidIdent(s) {
+		if f == 0 || !ast.IsValidIdent(s) {
 			return ast.NewLit(token.STRING, literal.Label.Quote(s))
 		}
 		fallthrough

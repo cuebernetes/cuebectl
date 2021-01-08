@@ -45,7 +45,7 @@ const (
 // IsConcrete returns whether a value is concrete.
 func IsConcrete(v Value) bool {
 	if x, ok := v.(*Vertex); ok {
-		v = x.Value
+		return x.IsConcrete()
 	}
 	if v == nil {
 		return false
@@ -63,6 +63,7 @@ const (
 	FloatKind
 	StringKind
 	BytesKind
+	FuncKind
 	ListKind
 	StructKind
 
@@ -162,6 +163,7 @@ var kindStrs = map[Kind]string{
 	FloatKind:   "float",
 	StringKind:  "string",
 	BytesKind:   "bytes",
+	FuncKind:    "func",
 	StructKind:  "struct",
 	ListKind:    "list",
 	_numberKind: "number",
@@ -175,6 +177,7 @@ var typeStrs = map[Kind]string{
 	FloatKind:   "float",
 	StringKind:  "string",
 	BytesKind:   "bytes",
+	FuncKind:    "_",
 	StructKind:  "{...}",
 	ListKind:    "[...]",
 	_numberKind: "number",

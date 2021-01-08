@@ -48,10 +48,15 @@ import (
 type Builtin struct {
 	Name   string
 	Pkg    adt.Feature
-	Params []adt.Kind
+	Params []Param
 	Result adt.Kind
 	Func   func(c *CallCtxt)
 	Const  string
+}
+
+type Param struct {
+	Kind  adt.Kind
+	Value adt.Value // input constraint (may be nil)
 }
 
 type Package struct {
@@ -59,9 +64,9 @@ type Package struct {
 	CUE    string
 }
 
-func (p *Package) MustCompile(ctx *adt.OpContext, pkgName string) *adt.Vertex {
+func (p *Package) MustCompile(ctx *adt.OpContext, importPath string) *adt.Vertex {
 	obj := &adt.Vertex{}
-	pkgLabel := ctx.StringLabel(pkgName)
+	pkgLabel := ctx.StringLabel(importPath)
 	st := &adt.StructLit{}
 	if len(p.Native) > 0 {
 		obj.AddConjunct(adt.MakeRootConjunct(nil, st))
@@ -83,11 +88,11 @@ func (p *Package) MustCompile(ctx *adt.OpContext, pkgName string) *adt.Vertex {
 
 	// Parse builtin CUE
 	if p.CUE != "" {
-		expr, err := parser.ParseExpr(pkgName, p.CUE)
+		expr, err := parser.ParseExpr(importPath, p.CUE)
 		if err != nil {
 			panic(fmt.Errorf("could not parse %v: %v", p.CUE, err))
 		}
-		c, err := compile.Expr(nil, ctx.Runtime, expr)
+		c, err := compile.Expr(nil, ctx.Runtime, importPath, expr)
 		if err != nil {
 			panic(fmt.Errorf("could compile parse %v: %v", p.CUE, err))
 		}
@@ -104,8 +109,16 @@ func (p *Package) MustCompile(ctx *adt.OpContext, pkgName string) *adt.Vertex {
 }
 
 func toBuiltin(ctx *adt.OpContext, b *Builtin) *adt.Builtin {
+	params := make([]adt.Param, len(b.Params))
+	for i, p := range b.Params {
+		params[i].Value = p.Value
+		if params[i].Value == nil {
+			params[i].Value = &adt.BasicType{K: p.Kind}
+		}
+	}
+
 	x := &adt.Builtin{
-		Params:  b.Params,
+		Params:  params,
 		Result:  b.Result,
 		Package: b.Pkg,
 		Name:    b.Name,
@@ -127,6 +140,9 @@ func toBuiltin(ctx *adt.OpContext, b *Builtin) *adt.Builtin {
 		}()
 		b.Func(c)
 		switch v := c.Ret.(type) {
+		case nil:
+			// Validators may return a nil in case validation passes.
+			return nil
 		case adt.Value:
 			return v
 		case bottomer:
@@ -147,7 +163,7 @@ func mustParseConstBuiltin(ctx adt.Runtime, name, val string) adt.Expr {
 	if err != nil {
 		panic(err)
 	}
-	c, err := compile.Expr(nil, ctx, expr)
+	c, err := compile.Expr(nil, ctx, "_", expr)
 	if err != nil {
 		panic(err)
 	}

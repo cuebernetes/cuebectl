@@ -17,7 +17,6 @@ package export
 import (
 	"bytes"
 	"fmt"
-	"strconv"
 	"strings"
 
 	"cuelang.org/go/cue/ast"
@@ -28,7 +27,7 @@ import (
 )
 
 func (e *exporter) ident(x adt.Feature) *ast.Ident {
-	s := e.ctx.IndexToString(int64(x.Index()))
+	s := x.IdentString(e.ctx)
 	if !ast.IsValidIdent(s) {
 		panic(s + " is not a valid identifier")
 	}
@@ -63,15 +62,34 @@ func (e *exporter) adt(expr adt.Expr, conjuncts []adt.Conjunct) ast.Expr {
 
 	case *adt.FieldReference:
 		f := e.frame(x.UpCount)
-		ident := e.ident(x.Label)
 		entry := f.fields[x.Label]
+
+		name := x.Label.IdentString(e.ctx)
+		switch {
+		case entry.alias != "":
+			name = entry.alias
+
+		case !ast.IsValidIdent(name):
+			name = "X"
+			if x.Src != nil {
+				name = x.Src.Name
+			}
+			name = e.uniqueAlias(name)
+			entry.alias = name
+		}
+
+		ident := ast.NewIdent(name)
 		entry.references = append(entry.references, ident)
+
+		if f.fields != nil {
+			f.fields[x.Label] = entry
+		}
+
 		return ident
 
 	case *adt.LabelReference:
 		// get potential label from Source. Otherwise use X.
 		f := e.frame(x.UpCount)
-		var ident *ast.Ident
 		if f.field == nil {
 			// This can happen when the LabelReference is evaluated outside of
 			// normal evaluation, that is, if a pattern constraint or
@@ -82,24 +100,35 @@ func (e *exporter) adt(expr adt.Expr, conjuncts []adt.Conjunct) ast.Expr {
 		if !ok || len(list.Elts) != 1 {
 			panic("label reference to non-pattern constraint field or invalid list")
 		}
+		name := ""
 		if a, ok := list.Elts[0].(*ast.Alias); ok {
-			ident = ast.NewIdent(a.Ident.Name)
+			name = a.Ident.Name
 		} else {
-			ident = ast.NewIdent("X" + strconv.Itoa(e.unique))
-			e.unique++
+			if x.Src != nil {
+				name = x.Src.Name
+			}
+			name = e.uniqueAlias(name)
 			list.Elts[0] = &ast.Alias{
-				Ident: ast.NewIdent(ident.Name),
+				Ident: ast.NewIdent(name),
 				Expr:  list.Elts[0],
 			}
 		}
+		ident := ast.NewIdent(name)
 		ident.Scope = f.field
 		ident.Node = f.labelExpr
 		return ident
 
 	case *adt.DynamicReference:
 		// get potential label from Source. Otherwise use X.
-		ident := ast.NewIdent("X")
+		name := "X"
 		f := e.frame(x.UpCount)
+		if d := f.field; d != nil {
+			if x.Src != nil {
+				name = x.Src.Name
+			}
+			name = e.getFieldAlias(d, name)
+		}
+		ident := ast.NewIdent(name)
 		ident.Scope = f.field
 		ident.Node = f.field
 		return ident
@@ -121,14 +150,10 @@ func (e *exporter) adt(expr adt.Expr, conjuncts []adt.Conjunct) ast.Expr {
 		return ident
 
 	case *adt.LetReference:
-		// TODO:
-		// - rename if necessary
-		// - look in to reusing the mechanism of the old evaluator
-		//
-		// Either way, we need a better mechanism. References may go out of
-		// scope. In case of aliases this means they may need to be reproduced
-		// locally. Most of these issues can be avoided by either fully
-		// expanding a configuration (export) or not at all (def).
+		// TODO: Handle references that went out of scope. In case of aliases
+		// this means they may need to be reproduced locally. Most of these
+		// issues can be avoided by either fully expanding a configuration
+		// (export) or not at all (def).
 		//
 		i := len(e.stack) - 1 - int(x.UpCount) - 1
 		if i < 0 {
@@ -140,14 +165,33 @@ func (e *exporter) adt(expr adt.Expr, conjuncts []adt.Conjunct) ast.Expr {
 			if f.let == nil {
 				f.let = map[adt.Expr]*ast.LetClause{}
 			}
-			let = &ast.LetClause{
-				Ident: e.ident(x.Label),
-				Expr:  e.expr(x.X),
+			label := e.uniqueLetIdent(x.Label, x.X)
+
+			name := label.IdentString(e.ctx)
+
+			// A let may be added multiple times to the same scope as a result
+			// of how merging works. If that happens here it must be one
+			// originating from the same expression, and it is safe to drop.
+			for _, elt := range f.scope.Elts {
+				if a, ok := elt.(*ast.LetClause); ok {
+					if a.Ident.Name == name {
+						let = a
+						break
+					}
+				}
 			}
+
+			if let == nil {
+				let = &ast.LetClause{
+					Ident: e.ident(label),
+					Expr:  e.expr(x.X),
+				}
+				f.scope.Elts = append(f.scope.Elts, let)
+			}
+
 			f.let[x.X] = let
-			f.scope.Elts = append(f.scope.Elts, let)
 		}
-		ident := e.ident(x.Label)
+		ident := ast.NewIdent(let.Ident.Name)
 		ident.Node = let
 		ident.Scope = f.scope
 		return ident
@@ -179,19 +223,38 @@ func (e *exporter) adt(expr adt.Expr, conjuncts []adt.Conjunct) ast.Expr {
 		return &ast.SliceExpr{X: e.expr(x.X), Low: lo, High: hi}
 
 	case *adt.Interpolation:
+		var (
+			tripple    = `"""`
+			openQuote  = `"`
+			closeQuote = `"`
+			f          = literal.String
+		)
+		if x.K&adt.BytesKind != 0 {
+			tripple = `'''`
+			openQuote = `'`
+			closeQuote = `'`
+			f = literal.Bytes
+		}
+		toString := func(v adt.Expr) string {
+			str := ""
+			switch x := v.(type) {
+			case *adt.String:
+				str = x.Str
+			case *adt.Bytes:
+				str = string(x.B)
+			}
+			return str
+		}
 		t := &ast.Interpolation{}
-		f := literal.String.WithGraphicOnly() // TODO: also support bytes
-		openQuote := `"`
-		closeQuote := `"`
+		f = f.WithGraphicOnly()
 		indent := ""
 		// TODO: mark formatting in interpolation itself.
 		for i := 0; i < len(x.Parts); i += 2 {
-			str := x.Parts[i].(*adt.String).Str
-			if strings.IndexByte(str, '\n') >= 0 {
+			if strings.IndexByte(toString(x.Parts[i]), '\n') >= 0 {
 				f = f.WithTabIndent(len(e.stack))
 				indent = strings.Repeat("\t", len(e.stack))
-				openQuote = `"""` + "\n" + indent
-				closeQuote = `"""`
+				openQuote = tripple + "\n" + indent
+				closeQuote = tripple
 				break
 			}
 		}
@@ -203,7 +266,7 @@ func (e *exporter) adt(expr adt.Expr, conjuncts []adt.Conjunct) ast.Expr {
 			} else {
 				// b := strings.Builder{}
 				buf := []byte(prefix)
-				str := elem.(*adt.String).Str
+				str := toString(elem)
 				buf = f.AppendEscaped(buf, str)
 				if i == len(x.Parts)-1 {
 					if len(closeQuote) > 1 {
@@ -283,9 +346,16 @@ func (e *exporter) decl(d adt.Decl) ast.Decl {
 		e.setDocs(x)
 		f := &ast.Field{
 			Label: e.stringLabel(x.Label),
-			Value: e.expr(x.Value),
 		}
-		e.addField(x.Label, f.Value)
+
+		frame := e.frame(0)
+		entry := frame.fields[x.Label]
+		entry.field = f
+		entry.node = f.Value
+		frame.fields[x.Label] = entry
+
+		f.Value = e.expr(x.Value)
+
 		// extractDocs(nil)
 		return f
 
@@ -294,9 +364,16 @@ func (e *exporter) decl(d adt.Decl) ast.Decl {
 		f := &ast.Field{
 			Label:    e.stringLabel(x.Label),
 			Optional: token.NoSpace.Pos(),
-			Value:    e.expr(x.Value),
 		}
-		e.addField(x.Label, f.Value)
+
+		frame := e.frame(0)
+		entry := frame.fields[x.Label]
+		entry.field = f
+		entry.node = f.Value
+		frame.fields[x.Label] = entry
+
+		f.Value = e.expr(x.Value)
+
 		// extractDocs(nil)
 		return f
 
@@ -385,9 +462,9 @@ func (e *exporter) comprehension(y adt.Yielder) ast.Expr {
 			if x.Key != 0 {
 				key := e.ident(x.Key)
 				clause.Key = key
-				e.addField(x.Key, clause)
+				e.addField(x.Key, nil, clause)
 			}
-			e.addField(x.Value, clause)
+			e.addField(x.Value, nil, clause)
 
 			y = x.Dst
 
@@ -397,13 +474,16 @@ func (e *exporter) comprehension(y adt.Yielder) ast.Expr {
 			y = x.Dst
 
 		case *adt.LetClause:
-			clause := &ast.LetClause{Expr: e.expr(x.Expr)}
+			clause := &ast.LetClause{
+				Ident: e.ident(x.Label),
+				Expr:  e.expr(x.Expr),
+			}
 			c.Clauses = append(c.Clauses, clause)
 
 			_, saved := e.pushFrame(nil)
 			defer e.popFrame(saved)
 
-			e.addField(x.Label, clause)
+			e.addField(x.Label, nil, clause)
 
 			y = x.Dst
 

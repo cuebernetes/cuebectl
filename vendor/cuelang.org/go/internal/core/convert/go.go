@@ -68,7 +68,7 @@ func toValue(e adt.Expr) adt.Value {
 }
 
 func compileExpr(ctx *adt.OpContext, expr ast.Expr) adt.Value {
-	c, err := compile.Expr(nil, ctx, expr)
+	c, err := compile.Expr(nil, ctx, pkgID(), expr)
 	if err != nil {
 		return &adt.Bottom{Err: errors.Promote(err, "compile")}
 	}
@@ -99,6 +99,9 @@ var tagsWithNames = []string{"json", "yaml", "protobuf"}
 
 func getName(f *reflect.StructField) string {
 	name := f.Name
+	if f.Anonymous {
+		name = ""
+	}
 	for _, s := range tagsWithNames {
 		if tag, ok := f.Tag.Lookup(s); ok {
 			if p := strings.Index(tag, ","); p >= 0 {
@@ -224,7 +227,7 @@ func isNil(x reflect.Value) bool {
 func convertRec(ctx *adt.OpContext, nilIsTop bool, x interface{}) adt.Value {
 	if internal.CoreValue != nil {
 		if ii, iv := internal.CoreValue(x); ii != nil {
-			i := ii.(*runtime.Index)
+			i := ii.(*runtime.Runtime)
 			v := iv.(*adt.Vertex)
 			// TODO: panic if nto the same runtime.
 			_ = i
@@ -241,7 +244,7 @@ func convertRec(ctx *adt.OpContext, nilIsTop bool, x interface{}) adt.Value {
 		return &adt.Null{Src: ctx.Source()}
 
 	case *ast.File:
-		x, err := compile.Files(nil, ctx, v)
+		x, err := compile.Files(nil, ctx, pkgID(), v)
 		if err != nil {
 			return &adt.Bottom{Err: errors.Promote(err, "compile")}
 		}
@@ -281,10 +284,13 @@ func convertRec(ctx *adt.OpContext, nilIsTop bool, x interface{}) adt.Value {
 		// a float or an int after all.
 		// The code to autodetect whether something is an integer can be done
 		// with this:
-		// var d apd.Decimal
-		// res, _ := apd.BaseContext.RoundToIntegralExact(&d, v)
-		// integer := !res.Inexact()
-		n := &adt.Num{Src: ctx.Source(), K: adt.FloatKind}
+		kind := adt.FloatKind
+		var d apd.Decimal
+		res, _ := apd.BaseContext.RoundToIntegralExact(&d, v)
+		if !res.Inexact() {
+			kind = adt.IntKind
+		}
+		n := &adt.Num{Src: ctx.Source(), K: kind}
 		n.X = *v
 		return n
 
@@ -399,24 +405,23 @@ func convertRec(ctx *adt.OpContext, nilIsTop bool, x interface{}) adt.Value {
 
 		case reflect.Struct:
 			obj := &adt.StructLit{Src: src}
-			v := &adt.Vertex{}
-			v.AddConjunct(adt.MakeRootConjunct(nil, obj))
+			v := &adt.Vertex{Structs: []*adt.StructLit{obj}}
 			v.SetValue(ctx, adt.Finalized, &adt.StructMarker{})
 
 			t := value.Type()
 			for i := 0; i < value.NumField(); i++ {
-				t := t.Field(i)
-				if t.PkgPath != "" {
+				sf := t.Field(i)
+				if sf.PkgPath != "" {
 					continue
 				}
 				val := value.Field(i)
 				if !nilIsTop && isNil(val) {
 					continue
 				}
-				if tag, _ := t.Tag.Lookup("json"); tag == "-" {
+				if tag, _ := sf.Tag.Lookup("json"); tag == "-" {
 					continue
 				}
-				if isOmitEmpty(&t) && isZero(val) {
+				if isOmitEmpty(&sf) && isZero(val) {
 					continue
 				}
 				sub := convertRec(ctx, nilIsTop, val.Interface())
@@ -430,17 +435,26 @@ func convertRec(ctx *adt.OpContext, nilIsTop bool, x interface{}) adt.Value {
 
 				// leave errors like we do during normal evaluation or do we
 				// want to return the error?
-				name := getName(&t)
+				name := getName(&sf)
 				if name == "-" {
 					continue
 				}
+				if sf.Anonymous && name == "" {
+					arc, ok := sub.(*adt.Vertex)
+					if ok {
+						v.Arcs = append(v.Arcs, arc.Arcs...)
+					}
+					continue
+				}
+
 				f := ctx.StringLabel(name)
 				obj.Decls = append(obj.Decls, &adt.Field{Label: f, Value: sub})
 				arc, ok := sub.(*adt.Vertex)
 				if ok {
 					arc.Label = f
 				} else {
-					arc = &adt.Vertex{Label: f, Value: sub}
+					arc = &adt.Vertex{Label: f, BaseValue: sub}
+					arc.UpdateStatus(adt.Finalized)
 					arc.AddConjunct(adt.MakeRootConjunct(nil, sub))
 				}
 				v.Arcs = append(v.Arcs, arc)
@@ -449,9 +463,7 @@ func convertRec(ctx *adt.OpContext, nilIsTop bool, x interface{}) adt.Value {
 			return v
 
 		case reflect.Map:
-			obj := &adt.StructLit{Src: src}
-			v := &adt.Vertex{Value: &adt.StructMarker{}}
-			v.AddConjunct(adt.MakeRootConjunct(nil, obj))
+			v := &adt.Vertex{BaseValue: &adt.StructMarker{}}
 			v.SetValue(ctx, adt.Finalized, &adt.StructMarker{})
 
 			t := value.Type()
@@ -483,15 +495,12 @@ func convertRec(ctx *adt.OpContext, nilIsTop bool, x interface{}) adt.Value {
 
 					s := fmt.Sprint(k)
 					f := ctx.StringLabel(s)
-					obj.Decls = append(obj.Decls, &adt.Field{
-						Label: f,
-						Value: sub,
-					})
 					arc, ok := sub.(*adt.Vertex)
 					if ok {
 						arc.Label = f
 					} else {
-						arc = &adt.Vertex{Label: f, Value: sub}
+						arc = &adt.Vertex{Label: f, BaseValue: sub}
+						arc.UpdateStatus(adt.Finalized)
 						arc.AddConjunct(adt.MakeRootConjunct(nil, sub))
 					}
 					v.Arcs = append(v.Arcs, arc)
@@ -737,7 +746,7 @@ store:
 			ctx.AddErrf(msg, args...)
 		})
 		var x adt.Expr
-		c, err := compile.Expr(nil, ctx, e)
+		c, err := compile.Expr(nil, ctx, pkgID(), e)
 		if err != nil {
 			b := &adt.Bottom{Err: err}
 			ctx.AddBottom(b)
@@ -787,4 +796,9 @@ func makeNullable(e ast.Expr, nullIsDefault bool) ast.Expr {
 		null = &ast.UnaryExpr{Op: token.MUL, X: null}
 	}
 	return ast.NewBinExpr(token.OR, null, e)
+}
+
+// pkgID returns a package path that can never resolve to an existing package.
+func pkgID() string {
+	return "_"
 }

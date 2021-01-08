@@ -23,14 +23,21 @@ import (
 
 const supportedByLen = adt.StructKind | adt.BytesKind | adt.StringKind | adt.ListKind
 
+var (
+	stringParam = adt.Param{Value: &adt.BasicType{K: adt.StringKind}}
+	structParam = adt.Param{Value: &adt.BasicType{K: adt.StructKind}}
+	listParam   = adt.Param{Value: &adt.BasicType{K: adt.ListKind}}
+	intParam    = adt.Param{Value: &adt.BasicType{K: adt.IntKind}}
+)
+
 var lenBuiltin = &adt.Builtin{
 	Name:   "len",
-	Params: []adt.Kind{supportedByLen},
+	Params: []adt.Param{{Value: &adt.BasicType{K: supportedByLen}}},
 	Result: adt.IntKind,
 	Func: func(c *adt.OpContext, args []adt.Value) adt.Expr {
 		v := args[0]
 		if x, ok := v.(*adt.Vertex); ok {
-			switch x.Value.(type) {
+			switch x.BaseValue.(type) {
 			case nil:
 				// This should not happen, but be defensive.
 				return c.NewErrf("unevaluated vertex")
@@ -48,7 +55,7 @@ var lenBuiltin = &adt.Builtin{
 				return c.NewInt64(int64(n), v)
 
 			default:
-				v = x.Value
+				v = x.Value()
 			}
 		}
 
@@ -71,7 +78,7 @@ var lenBuiltin = &adt.Builtin{
 
 var closeBuiltin = &adt.Builtin{
 	Name:   "close",
-	Params: []adt.Kind{adt.StructKind},
+	Params: []adt.Param{structParam},
 	Result: adt.StructKind,
 	Func: func(c *adt.OpContext, args []adt.Value) adt.Expr {
 		s, ok := args[0].(*adt.Vertex)
@@ -82,14 +89,14 @@ var closeBuiltin = &adt.Builtin{
 			return s
 		}
 		v := *s
-		v.Value = &adt.StructMarker{NeedClose: true}
+		v.BaseValue = &adt.StructMarker{NeedClose: true}
 		return &v
 	},
 }
 
 var andBuiltin = &adt.Builtin{
 	Name:   "and",
-	Params: []adt.Kind{adt.ListKind},
+	Params: []adt.Param{listParam},
 	Result: adt.IntKind,
 	Func: func(c *adt.OpContext, args []adt.Value) adt.Expr {
 		list := c.Elems(args[0])
@@ -98,7 +105,7 @@ var andBuiltin = &adt.Builtin{
 		}
 		a := []adt.Value{}
 		for _, c := range list {
-			a = append(a, c.Value)
+			a = append(a, c)
 		}
 		return &adt.Conjunction{Values: a}
 	},
@@ -106,7 +113,7 @@ var andBuiltin = &adt.Builtin{
 
 var orBuiltin = &adt.Builtin{
 	Name:   "or",
-	Params: []adt.Kind{adt.ListKind},
+	Params: []adt.Param{listParam},
 	Result: adt.IntKind,
 	Func: func(c *adt.OpContext, args []adt.Value) adt.Expr {
 		d := []adt.Disjunct{}
@@ -134,4 +141,61 @@ var orBuiltin = &adt.Builtin{
 		c.Unify(c, v, adt.Finalized)
 		return v
 	},
+}
+
+var divBuiltin = &adt.Builtin{
+	Name:   "div",
+	Params: []adt.Param{intParam, intParam},
+	Result: adt.IntKind,
+	Func: func(c *adt.OpContext, args []adt.Value) adt.Expr {
+		const name = "argument to div builtin"
+
+		return intDivOp(c, (*adt.OpContext).IntDiv, name, args)
+	},
+}
+
+var modBuiltin = &adt.Builtin{
+	Name:   "mod",
+	Params: []adt.Param{intParam, intParam},
+	Result: adt.IntKind,
+	Func: func(c *adt.OpContext, args []adt.Value) adt.Expr {
+		const name = "argument to mod builtin"
+
+		return intDivOp(c, (*adt.OpContext).IntMod, name, args)
+	},
+}
+
+var quoBuiltin = &adt.Builtin{
+	Name:   "quo",
+	Params: []adt.Param{intParam, intParam},
+	Result: adt.IntKind,
+	Func: func(c *adt.OpContext, args []adt.Value) adt.Expr {
+		const name = "argument to quo builtin"
+
+		return intDivOp(c, (*adt.OpContext).IntQuo, name, args)
+	},
+}
+
+var remBuiltin = &adt.Builtin{
+	Name:   "rem",
+	Params: []adt.Param{intParam, intParam},
+	Result: adt.IntKind,
+	Func: func(c *adt.OpContext, args []adt.Value) adt.Expr {
+		const name = "argument to rem builtin"
+
+		return intDivOp(c, (*adt.OpContext).IntRem, name, args)
+	},
+}
+
+type intFunc func(c *adt.OpContext, x, y *adt.Num) adt.Value
+
+func intDivOp(c *adt.OpContext, fn intFunc, name string, args []adt.Value) adt.Value {
+	a := c.Num(args[0], name)
+	b := c.Num(args[1], name)
+
+	if c.HasErr() {
+		return nil
+	}
+
+	return fn(c, a, b)
 }

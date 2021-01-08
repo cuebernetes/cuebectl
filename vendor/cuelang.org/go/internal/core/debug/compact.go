@@ -34,7 +34,7 @@ type compactPrinter struct {
 func (w *compactPrinter) node(n adt.Node) {
 	switch x := n.(type) {
 	case *adt.Vertex:
-		if x.Value == nil || (w.cfg.Raw && !x.IsData()) {
+		if x.BaseValue == nil || (w.cfg.Raw && !x.IsData()) {
 			for i, c := range x.Conjuncts {
 				if i > 0 {
 					w.string(" & ")
@@ -44,7 +44,7 @@ func (w *compactPrinter) node(n adt.Node) {
 			return
 		}
 
-		switch x.Value.(type) {
+		switch v := x.BaseValue.(type) {
 		case *adt.StructMarker:
 			w.string("{")
 			for i, a := range x.Arcs {
@@ -67,8 +67,8 @@ func (w *compactPrinter) node(n adt.Node) {
 			}
 			w.string("]")
 
-		default:
-			w.node(x.Value)
+		case adt.Value:
+			w.node(v)
 		}
 
 	case *adt.StructMarker:
@@ -193,7 +193,7 @@ func (w *compactPrinter) node(n adt.Node) {
 		w.label(x.ImportPath)
 
 	case *adt.LetReference:
-		w.label(x.Label)
+		w.ident(x.Label)
 
 	case *adt.SelectorExpr:
 		w.node(x.X)
@@ -300,9 +300,9 @@ func (w *compactPrinter) node(n adt.Node) {
 
 	case *adt.ForClause:
 		w.string("for ")
-		w.label(x.Key)
+		w.ident(x.Key)
 		w.string(", ")
-		w.label(x.Value)
+		w.ident(x.Value)
 		w.string(" in ")
 		w.node(x.Src)
 		w.string(" ")
@@ -316,7 +316,7 @@ func (w *compactPrinter) node(n adt.Node) {
 
 	case *adt.LetClause:
 		w.string("let ")
-		w.label(x.Label)
+		w.ident(x.Label)
 		w.string(" = ")
 		w.node(x.Expr)
 		w.string(" ")

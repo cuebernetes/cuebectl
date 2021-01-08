@@ -1,6 +1,6 @@
 # cloud.google.com/go v0.51.0
 cloud.google.com/go/compute/metadata
-# cuelang.org/go v0.3.0-alpha4
+# cuelang.org/go v0.3.0-alpha6
 ## explicit
 cuelang.org/go/cue
 cuelang.org/go/cue/ast
@@ -19,7 +19,6 @@ cuelang.org/go/encoding/jsonschema
 cuelang.org/go/encoding/openapi
 cuelang.org/go/encoding/protobuf
 cuelang.org/go/internal
-cuelang.org/go/internal/builtin
 cuelang.org/go/internal/cli
 cuelang.org/go/internal/core/adt
 cuelang.org/go/internal/core/compile
@@ -30,6 +29,7 @@ cuelang.org/go/internal/core/export
 cuelang.org/go/internal/core/runtime
 cuelang.org/go/internal/core/subsume
 cuelang.org/go/internal/core/validate
+cuelang.org/go/internal/core/walk
 cuelang.org/go/internal/encoding
 cuelang.org/go/internal/encoding/json
 cuelang.org/go/internal/encoding/yaml
@@ -178,7 +178,6 @@ github.com/mpvl/unique
 # github.com/peterbourgon/diskv v2.0.1+incompatible
 github.com/peterbourgon/diskv
 # github.com/pkg/errors v0.9.1
-## explicit
 github.com/pkg/errors
 # github.com/russross/blackfriday v1.5.2
 github.com/russross/blackfriday
@@ -216,6 +215,7 @@ golang.org/x/oauth2/internal
 golang.org/x/oauth2/jws
 golang.org/x/oauth2/jwt
 # golang.org/x/sync v0.0.0-20190911185100-cd5d95a43a6e
+## explicit
 golang.org/x/sync/errgroup
 # golang.org/x/sys v0.0.0-20200622214017-ed371f2e16b4
 golang.org/x/sys/internal/unsafeheader

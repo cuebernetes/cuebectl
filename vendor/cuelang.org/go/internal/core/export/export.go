@@ -15,12 +15,16 @@
 package export
 
 import (
+	"fmt"
+	"math/rand"
+
 	"cuelang.org/go/cue/ast"
 	"cuelang.org/go/cue/ast/astutil"
 	"cuelang.org/go/cue/errors"
 	"cuelang.org/go/internal"
 	"cuelang.org/go/internal/core/adt"
 	"cuelang.org/go/internal/core/eval"
+	"cuelang.org/go/internal/core/walk"
 )
 
 const debug = false
@@ -35,11 +39,16 @@ type Profile struct {
 	// IncludeDocs
 	ShowOptional    bool
 	ShowDefinitions bool
-	ShowHidden      bool
-	ShowDocs        bool
-	ShowAttributes  bool
 
-	// AllowErrorType
+	// ShowHidden forces the inclusion of hidden fields when these would
+	// otherwise be omitted. Only hidden fields from the current package are
+	// included.
+	ShowHidden     bool
+	ShowDocs       bool
+	ShowAttributes bool
+
+	// ShowErrors treats errors as values and will not percolate errors up.
+	ShowErrors bool
 	// Use unevaluated conjuncts for these error types
 	// IgnoreRecursive
 
@@ -77,17 +86,21 @@ var All = &Profile{
 // Concrete
 
 // Def exports v as a definition.
-func Def(r adt.Runtime, v *adt.Vertex) (*ast.File, errors.Error) {
-	return All.Def(r, v)
+func Def(r adt.Runtime, pkgID string, v *adt.Vertex) (*ast.File, errors.Error) {
+	return All.Def(r, pkgID, v)
 }
 
 // Def exports v as a definition.
-func (p *Profile) Def(r adt.Runtime, v *adt.Vertex) (*ast.File, errors.Error) {
-	e := newExporter(p, r, v)
+func (p *Profile) Def(r adt.Runtime, pkgID string, v *adt.Vertex) (*ast.File, errors.Error) {
+	e := newExporter(p, r, pkgID, v)
+	e.markUsedFeatures(v)
+
 	if v.Label.IsDef() {
 		e.inDefinition++
 	}
+
 	expr := e.expr(v)
+
 	if v.Label.IsDef() {
 		e.inDefinition--
 		if s, ok := expr.(*ast.StructLit); ok {
@@ -100,12 +113,14 @@ func (p *Profile) Def(r adt.Runtime, v *adt.Vertex) (*ast.File, errors.Error) {
 	return e.toFile(v, expr)
 }
 
-func Expr(r adt.Runtime, n adt.Expr) (ast.Expr, errors.Error) {
-	return Simplified.Expr(r, n)
+func Expr(r adt.Runtime, pkgID string, n adt.Expr) (ast.Expr, errors.Error) {
+	return Simplified.Expr(r, pkgID, n)
 }
 
-func (p *Profile) Expr(r adt.Runtime, n adt.Expr) (ast.Expr, errors.Error) {
-	e := newExporter(p, r, nil)
+func (p *Profile) Expr(r adt.Runtime, pkgID string, n adt.Expr) (ast.Expr, errors.Error) {
+	e := newExporter(p, r, pkgID, nil)
+	e.markUsedFeatures(n)
+
 	return e.expr(n), nil
 }
 
@@ -156,31 +171,36 @@ func (e *exporter) toFile(v *adt.Vertex, x ast.Expr) (*ast.File, errors.Error) {
 
 // File
 
-func Vertex(r adt.Runtime, n *adt.Vertex) (*ast.File, errors.Error) {
-	return Simplified.Vertex(r, n)
+func Vertex(r adt.Runtime, pkgID string, n *adt.Vertex) (*ast.File, errors.Error) {
+	return Simplified.Vertex(r, pkgID, n)
 }
 
-func (p *Profile) Vertex(r adt.Runtime, n *adt.Vertex) (*ast.File, errors.Error) {
+func (p *Profile) Vertex(r adt.Runtime, pkgID string, n *adt.Vertex) (*ast.File, errors.Error) {
 	e := exporter{
+		ctx:   eval.NewContext(r, nil),
 		cfg:   p,
 		index: r,
+		pkgID: pkgID,
 	}
+	e.markUsedFeatures(n)
 	v := e.value(n, n.Conjuncts...)
 
 	return e.toFile(n, v)
 }
 
-func Value(r adt.Runtime, n adt.Value) (ast.Expr, errors.Error) {
-	return Simplified.Value(r, n)
+func Value(r adt.Runtime, pkgID string, n adt.Value) (ast.Expr, errors.Error) {
+	return Simplified.Value(r, pkgID, n)
 }
 
 // Should take context.
-func (p *Profile) Value(r adt.Runtime, n adt.Value) (ast.Expr, errors.Error) {
+func (p *Profile) Value(r adt.Runtime, pkgID string, n adt.Value) (ast.Expr, errors.Error) {
 	e := exporter{
 		ctx:   eval.NewContext(r, nil),
 		cfg:   p,
 		index: r,
+		pkgID: pkgID,
 	}
+	e.markUsedFeatures(n)
 	v := e.value(n)
 	return v, e.errs
 }
@@ -192,20 +212,142 @@ type exporter struct {
 	ctx *adt.OpContext
 
 	index adt.StringIndexer
+	rand  *rand.Rand
 
 	// For resolving up references.
 	stack []frame
 
 	inDefinition int // for close() wrapping.
 
-	unique int
+	// hidden label handling
+	pkgID  string
+	hidden map[string]adt.Feature // adt.InvalidFeatures means more than one.
+
+	// If a used feature maps to an expression, it means it is assigned to a
+	// unique let expression.
+	usedFeature map[adt.Feature]adt.Expr
+	labelAlias  map[adt.Expr]adt.Feature
+
+	usedHidden map[string]bool
 }
 
-func newExporter(p *Profile, r adt.Runtime, v *adt.Vertex) *exporter {
+func newExporter(p *Profile, r adt.Runtime, pkgID string, v *adt.Vertex) *exporter {
 	return &exporter{
 		cfg:   p,
 		ctx:   eval.NewContext(r, v),
 		index: r,
+		pkgID: pkgID,
+	}
+}
+
+func (e *exporter) markUsedFeatures(x adt.Expr) {
+	e.usedFeature = make(map[adt.Feature]adt.Expr)
+
+	w := &walk.Visitor{}
+	w.Before = func(n adt.Node) bool {
+		switch x := n.(type) {
+		case *adt.Vertex:
+			if !x.IsData() {
+				for _, c := range x.Conjuncts {
+					w.Expr(c.Expr())
+				}
+			}
+
+		case *adt.DynamicReference:
+			if e.labelAlias == nil {
+				e.labelAlias = make(map[adt.Expr]adt.Feature)
+			}
+			// TODO: add preferred label.
+			e.labelAlias[x.Label] = adt.InvalidLabel
+
+		case *adt.LabelReference:
+		}
+		return true
+	}
+
+	w.Feature = func(f adt.Feature, src adt.Node) {
+		_, ok := e.usedFeature[f]
+
+		switch x := src.(type) {
+		case *adt.LetReference:
+			if !ok {
+				e.usedFeature[f] = x.X
+			}
+
+		default:
+			e.usedFeature[f] = nil
+		}
+	}
+
+	w.Expr(x)
+}
+
+func (e *exporter) getFieldAlias(f *ast.Field, name string) string {
+	a, ok := f.Label.(*ast.Alias)
+	if !ok {
+		a = &ast.Alias{
+			Ident: ast.NewIdent(e.uniqueAlias(name)),
+			Expr:  f.Label.(ast.Expr),
+		}
+		f.Label = a
+	}
+	return a.Ident.Name
+}
+
+func setFieldAlias(f *ast.Field, name string) {
+	if _, ok := f.Label.(*ast.Alias); !ok {
+		f.Label = &ast.Alias{
+			Ident: ast.NewIdent(name),
+			Expr:  f.Label.(ast.Expr),
+		}
+	}
+}
+
+// uniqueLetIdent returns a name for a let identifier that uniquely identifies
+// the given expression. If the preferred name is already taken, a new globally
+// unique name of the form base_X ... base_XXXXXXXXXXXXXX is generated.
+//
+// It prefers short extensions over large ones, while ensuring the likelihood of
+// fast termination is high. There are at least two digits to make it visually
+// clearer this concerns a generated number.
+//
+func (e exporter) uniqueLetIdent(f adt.Feature, x adt.Expr) adt.Feature {
+	if e.usedFeature[f] == x {
+		return f
+	}
+
+	f, _ = e.uniqueFeature(f.IdentString(e.ctx))
+	e.usedFeature[f] = x
+	return f
+}
+
+func (e exporter) uniqueAlias(name string) string {
+	f := adt.MakeIdentLabel(e.ctx, name, "")
+
+	if _, ok := e.usedFeature[f]; !ok {
+		e.usedFeature[f] = nil
+		return name
+	}
+
+	_, name = e.uniqueFeature(f.IdentString(e.ctx))
+	return name
+}
+
+func (e exporter) uniqueFeature(base string) (f adt.Feature, name string) {
+	if e.rand == nil {
+		e.rand = rand.New(rand.NewSource(808))
+	}
+
+	const mask = 0xff_ffff_ffff_ffff // max bits; stay clear of int64 overflow
+	const shift = 4                  // rate of growth
+	for n := int64(0x10); ; n = int64(mask&((n<<shift)-1)) + 1 {
+		num := e.rand.Intn(int(n))
+		name := fmt.Sprintf("%s_%01X", base, num)
+		f := adt.MakeIdentLabel(e.ctx, name, "")
+		if _, ok := e.usedFeature[f]; !ok {
+			e.usedFeature[f] = nil
+			return f, name
+		}
 	}
 }
 
@@ -231,16 +373,23 @@ type frame struct {
 }
 
 type entry struct {
-	node ast.Node
-
+	alias      string
+	field      *ast.Field
+	node       ast.Node // How to reference. See astutil.Resolve
 	references []*ast.Ident
 }
 
-func (e *exporter) addField(label adt.Feature, n ast.Node) {
+func (e *exporter) addField(label adt.Feature, f *ast.Field, n ast.Node) {
 	frame := e.top()
 	entry := frame.fields[label]
+	entry.field = f
 	entry.node = n
 	frame.fields[label] = entry
+}
+
+func (e *exporter) addEmbed(x ast.Expr) {
+	frame := e.top()
+	frame.scope.Elts = append(frame.scope.Elts, x)
 }
 
 func (e *exporter) pushFrame(conjuncts []adt.Conjunct) (s *ast.StructLit, saved []frame) {
@@ -259,8 +408,13 @@ func (e *exporter) popFrame(saved []frame) {
 	top := e.stack[len(e.stack)-1]
 
 	for _, f := range top.fields {
+		node := f.node
+		if f.alias != "" && f.field != nil {
+			setFieldAlias(f.field, f.alias)
+			node = f.field
+		}
 		for _, r := range f.references {
-			r.Node = f.node
+			r.Node = node
 		}
 	}
 

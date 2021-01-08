@@ -27,7 +27,6 @@ import (
 	"strings"
 
 	"github.com/cockroachdb/apd/v2"
-	"golang.org/x/xerrors"
 
 	"cuelang.org/go/cue/ast"
 	"cuelang.org/go/cue/ast/astutil"
@@ -72,10 +71,7 @@ var FromGoType func(instance, x interface{}) interface{}
 var UnifyBuiltin func(v interface{}, kind string) interface{}
 
 // GetRuntime reports the runtime for an Instance or Value.
-var GetRuntimeOld func(instance interface{}) interface{}
-
-// GetRuntime reports the runtime for an Instance or Value.
-var GetRuntimeNew func(instance interface{}) interface{}
+var GetRuntime func(instance interface{}) interface{}
 
 // CoreValue returns an *runtime.Index and *adt.Vertex for a cue.Value.
 // It returns nil if value is not a cue.Value.
@@ -87,12 +83,7 @@ var MakeInstance func(value interface{}) (instance interface{})
 // CheckAndForkRuntime checks that value is created using runtime, panicking
 // if it does not, and returns a forked runtime that will discard additional
 // keys.
-var CheckAndForkRuntimeOld func(runtime, value interface{}) interface{}
-
-// CheckAndForkRuntime checks that value is created using runtime, panicking
-// if it does not, and returns a forked runtime that will discard additional
-// keys.
-var CheckAndForkRuntimeNew func(runtime, value interface{}) interface{}
+var CheckAndForkRuntime func(runtime, value interface{}) interface{}
 
 // BaseContext is used as CUEs default context for arbitrary-precision decimals
 var BaseContext = apd.BaseContext.WithPrecision(24)
@@ -259,7 +250,13 @@ func ToExpr(n ast.Node) ast.Expr {
 				break outer
 			}
 		}
-		return &ast.StructLit{Elts: x.Decls[start:]}
+		decls := x.Decls[start:]
+		if len(decls) == 1 {
+			if e, ok := decls[0].(*ast.EmbedDecl); ok {
+				return e.Expr
+			}
+		}
+		return &ast.StructLit{Elts: decls}
 
 	default:
 		panic(fmt.Sprintf("Unsupported node type %T", x))
@@ -431,7 +428,7 @@ type decorated struct {
 }
 
 func (e *decorated) Is(err error) bool {
-	return xerrors.Is(e.info, err) || xerrors.Is(e.cueError, err)
+	return errors.Is(e.info, err) || errors.Is(e.cueError, err)
 }
 
 // MaxDepth indicates the maximum evaluation depth. This is there to break

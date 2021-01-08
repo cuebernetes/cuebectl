@@ -17,6 +17,8 @@ package eval
 import (
 	"sort"
 
+	"cuelang.org/go/cue/errors"
+	"cuelang.org/go/cue/token"
 	"cuelang.org/go/internal/core/adt"
 )
 
@@ -126,32 +128,48 @@ func (n *nodeContext) addDisjunctionValue(env *adt.Environment, x *adt.Disjuncti
 		envDisjunct{env, a, x.NumDefaults, cloneID})
 }
 
-func (n *nodeContext) updateResult() (isFinal bool) {
-	n.postDisjunct()
+func (n *nodeContext) updateResult(state adt.VertexStatus) (isFinal bool) {
+	n.postDisjunct(state)
 
+	x := n.node
 	if n.hasErr() {
+		err, ok := x.BaseValue.(*adt.Bottom)
+		if !ok {
+			err = n.getErr()
+		}
+		if err == nil {
+			// TODO(disjuncts): Is this always correct? Especially for partial
+			// evaluation it is okay for child errors to have incomplete errors.
+			// Perhaps introduce an Err() method.
+			err = x.ChildErrors
+		}
+		if err != nil {
+			n.disjunctErrs = append(n.disjunctErrs, err)
+		}
 		return n.isFinal
 	}
 
-	d := n.nodeShared.disjunct
-	if d == nil {
-		d = &adt.Disjunction{}
-		n.nodeShared.disjunct = d
-	}
+	n.touched = true
+	d := &n.nodeShared.disjunct
 
 	result := *n.node
-	if result.Value == nil {
-		result.Value = n.getValidators()
+	if result.BaseValue == nil {
+		result.BaseValue = n.getValidators()
 	}
 
 	for _, v := range d.Values {
-		if Equal(n.ctx, v, &result) {
+		if adt.Equal(n.ctx, v, &result) {
 			return isFinal
 		}
 	}
 
 	p := &result
 	d.Values = append(d.Values, p)
+
+	if n.done() && (!n.isDefault() || n.isDefault()) {
+		n.nodeShared.isDone = true
+	}
+
 	if n.defaultMode == isDefault {
 		// Keep defaults sorted first.
 		i := d.NumDefaults
@@ -172,29 +190,16 @@ func (n *nodeContext) updateResult() (isFinal bool) {
 	case !n.nodeShared.isDefault() && n.defaultMode == isDefault:
 
 	default:
-		if x := n.result(); x == nil && Equal(n.ctx, n.node, x) {
-			return n.isFinal
-		}
-
-		// TODO: Compute fancy error message.
-		n.nodeShared.resultNode = n
-		// n.nodeShared.result.AddErr(n.ctx, &adt.Bottom{
-		// 	Code: adt.IncompleteError,
-		// 	Err:  errors.Newf(n.ctx.Pos(), "ambiguous disjunction"),
-		// })
-		n.nodeShared.result_.Arcs = nil
-		n.nodeShared.result_.Structs = nil
 		return n.isFinal // n.defaultMode == isDefault
 	}
 
-	n.nodeShared.resultNode = n
 	n.nodeShared.setResult(n.node)
 
 	return n.isFinal
 }
 
-func (n *nodeContext) tryDisjuncts() (finished bool) {
-	if !n.insertDisjuncts() || !n.updateResult() {
+func (n *nodeContext) tryDisjuncts(state adt.VertexStatus) (finished bool) {
+	if !n.insertDisjuncts() || !n.updateResult(state) {
 		if !n.isFinal {
 			return false // More iterations to do.
 		}
@@ -205,15 +210,22 @@ func (n *nodeContext) tryDisjuncts() (finished bool) {
 	}
 
 	if len(n.disjunctions) > 0 {
-		b := &adt.Bottom{
-			// TODO(errors): we should not make this error worse by discarding
-			// the type or error. Using IncompleteError is a compromise. But
-			// really we should keep track of the errors and return a more
-			// accurate result here.
-			Code: adt.IncompleteError,
-			Err:  n.ctx.Newf("empty disjunction"),
+		code := adt.IncompleteError
+
+		if len(n.disjunctErrs) > 0 {
+			code = adt.EvalError
+			for _, c := range n.disjunctErrs {
+				if c.Code > code {
+					code = c.Code
+				}
+			}
 		}
-		n.node.AddErr(n.ctx, b)
+
+		b := &adt.Bottom{
+			Code: code,
+			Err:  n.disjunctError(),
+		}
+		n.node.SetValue(n.ctx, adt.Finalized, b)
 	}
 	return true
 }
@@ -225,11 +237,11 @@ func (n *nodeContext) insertDisjuncts() (inserted bool) {
 	p := 0
 	inserted = true
 
-	disjunctions := []envDisjunct{}
+	n.subDisjunctions = n.subDisjunctions[:0]
 
 	// fmt.Println("----", debug.NodeString(n.ctx, n.node, nil))
 	for _, d := range n.disjunctions {
-		disjunctions = append(disjunctions, d)
+		n.subDisjunctions = append(n.subDisjunctions, d)
 
 		sub := len(n.disjunctions)
 		defMode, ok := n.insertSingleDisjunct(p, d, false)
@@ -260,7 +272,7 @@ func (n *nodeContext) insertDisjuncts() (inserted bool) {
 			// 0 to a referenced number (forces the default to be discarded).
 			wasScalar := n.scalar != nil // Hack line 1
 
-			disjunctions = append(disjunctions, d)
+			n.subDisjunctions = append(n.subDisjunctions, d)
 			mode, ok := n.insertSingleDisjunct(p, d, true)
 			p++
 			if !ok {
@@ -278,7 +290,7 @@ func (n *nodeContext) insertDisjuncts() (inserted bool) {
 	}
 
 	// Find last disjunction at which there is no overflow.
-	for ; p > 0 && n.stack[p-1]+1 >= len(disjunctions[p-1].values); p-- {
+	for ; p > 0 && n.stack[p-1]+1 >= len(n.subDisjunctions[p-1].values); p-- {
 	}
 	if p > 0 {
 		// Increment a valid position and set all subsequent entries to 0.
@@ -408,4 +420,76 @@ func combineDefault(a, b defaultMode) defaultMode {
 	default:
 		panic("unreachable")
 	}
+}
+
+// disjunctError returns a compound error for a failed disjunction.
+//
+// TODO(perf): the set of errors is now computed during evaluation. Eventually,
+// this could be done lazily.
+func (n *nodeContext) disjunctError() (errs errors.Error) {
+	ctx := n.ctx
+
+	disjuncts := selectErrors(n.disjunctErrs)
+
+	if disjuncts == nil {
+		errs = ctx.Newf("empty disjunction")
+	} else {
+		disjuncts = errors.Sanitize(disjuncts)
+		k := len(errors.Errors(disjuncts))
+		errs = ctx.Newf("empty disjunction: %d related errors:", k)
+	}
+
+	errs = errors.Append(errs, disjuncts)
+
+	return errs
+}
+
+func selectErrors(a []*adt.Bottom) (errs errors.Error) {
+	// return all errors if less than a certain number.
+	if len(a) <= 2 {
+		for _, b := range a {
+			errs = errors.Append(errs, b.Err)
+
+		}
+		return errs
+	}
+
+	// First select only relevant errors.
+	isIncomplete := false
+	k := 0
+	for _, b := range a {
+		if !isIncomplete && b.Code >= adt.IncompleteError {
+			k = 0
+			isIncomplete = true
+		}
+		a[k] = b
+		k++
+	}
+	a = a[:k]
+
+	// filter errors
+	positions := map[token.Pos]bool{}
+
+	add := func(b *adt.Bottom, p token.Pos) bool {
+		if positions[p] {
+			return false
+		}
+		positions[p] = true
+		errs = errors.Append(errs, b.Err)
+		return true
+	}
+
+	for _, b := range a {
+		// TODO: Should we also distinguish by message type?
+		if add(b, b.Err.Position()) {
+			continue
+		}
+		for _, p := range b.Err.InputPositions() {
+			if add(b, p) {
+				break
+			}
+		}
+	}
+
+	return errs
 }

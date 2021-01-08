@@ -15,7 +15,6 @@
 package compile
 
 import (
-	"fmt"
 	"strings"
 
 	"cuelang.org/go/cue/ast"
@@ -24,7 +23,6 @@ import (
 	"cuelang.org/go/cue/token"
 	"cuelang.org/go/internal"
 	"cuelang.org/go/internal/core/adt"
-	"golang.org/x/xerrors"
 )
 
 // Config configures a compilation.
@@ -39,18 +37,23 @@ type Config struct {
 	// Imports allows unresolved identifiers to resolve to imports.
 	//
 	// Under normal circumstances, identifiers bind to import specifications,
-	// which get resolved to an ImportReference. Use this option to automaically
-	// resolve identifiers to imports.
+	// which get resolved to an ImportReference. Use this option to
+	// automatically resolve identifiers to imports.
 	Imports func(x *ast.Ident) (pkgPath string)
+
+	// pkgPath is used to qualify the scope of hidden fields. The default
+	// scope is "main".
+	pkgPath string
 }
 
 // Files compiles the given files as a single instance. It disregards
 // the package names and it is the responsibility of the user to verify that
-// the packages names are consistent.
+// the packages names are consistent. The pkgID must be a unique identifier
+// for a package in a module, for instance as obtained from build.Instance.ID.
 //
 // Files may return a completed parse even if it has errors.
-func Files(cfg *Config, r adt.Runtime, files ...*ast.File) (*adt.Vertex, errors.Error) {
-	c := newCompiler(cfg, r)
+func Files(cfg *Config, r adt.Runtime, pkgID string, files ...*ast.File) (*adt.Vertex, errors.Error) {
+	c := newCompiler(cfg, pkgID, r)
 
 	v := c.compileFiles(files)
 
@@ -60,14 +63,11 @@ func Files(cfg *Config, r adt.Runtime, files ...*ast.File) (*adt.Vertex, errors.
 	return v, nil
 }
 
-func Expr(cfg *Config, r adt.Runtime, x ast.Expr) (adt.Conjunct, errors.Error) {
-	if cfg == nil {
-		cfg = &Config{}
-	}
-	c := &compiler{
-		Config: *cfg,
-		index:  r,
-	}
+// Expr compiles the given expression into a conjunct. The pkgID must be a
+// unique identifier for a package in a module, for instance as obtained from
+// build.Instance.ID.
+func Expr(cfg *Config, r adt.Runtime, pkgPath string, x ast.Expr) (adt.Conjunct, errors.Error) {
+	c := newCompiler(cfg, pkgPath, r)
 
 	v := c.compileExpr(x)
 
@@ -77,13 +77,17 @@ func Expr(cfg *Config, r adt.Runtime, x ast.Expr) (adt.Conjunct, errors.Error) {
 	return v, nil
 }
 
-func newCompiler(cfg *Config, r adt.Runtime) *compiler {
+func newCompiler(cfg *Config, pkgPath string, r adt.Runtime) *compiler {
 	c := &compiler{
 		index: r,
 	}
 	if cfg != nil {
 		c.Config = *cfg
 	}
+	if pkgPath == "" {
+		pkgPath = "main"
+	}
+	c.Config.pkgPath = pkgPath
 	return c
 }
 
@@ -139,9 +143,11 @@ type frame struct {
 }
 
 type aliasEntry struct {
-	expr   adt.Expr
-	source ast.Node
-	used   bool
+	label   labeler
+	srcExpr ast.Expr
+	expr    adt.Expr
+	source  ast.Node
+	used    bool
 }
 
 func (c *compiler) insertAlias(id *ast.Ident, a aliasEntry) *adt.Bottom {
@@ -172,6 +178,8 @@ func (c *compiler) updateAlias(id *ast.Ident, expr adt.Expr) {
 
 	x := m[id.Name]
 	x.expr = expr
+	x.label = nil
+	x.srcExpr = nil
 	m[id.Name] = x
 }
 
@@ -184,6 +192,21 @@ func (c compiler) lookupAlias(k int, id *ast.Ident) aliasEntry {
 	if !ok {
 		err := c.errf(id, "could not find LetClause associated with identifier %q", name)
 		return aliasEntry{expr: err}
+	}
+
+	switch {
+	case entry.label != nil:
+		if entry.srcExpr == nil {
+			entry.expr = c.errf(id, "cyclic references in let clause or alias")
+			break
+		}
+
+		src := entry.srcExpr
+		entry.srcExpr = nil // mark to allow detecting cycles
+		m[name] = entry
+
+		entry.expr = c.labeledExpr(nil, entry.label, src)
+		entry.label = nil
 	}
 
 	entry.used = true
@@ -420,7 +443,7 @@ func (c *compiler) resolve(n *ast.Ident) adt.Expr {
 		}
 		name, _, err := ast.LabelName(lab)
 		switch {
-		case xerrors.Is(err, ast.ErrIsExpression):
+		case errors.Is(err, ast.ErrIsExpression):
 			if aliasInfo.expr == nil {
 				panic("unreachable")
 			}
@@ -477,11 +500,19 @@ func (c *compiler) markAlias(d ast.Decl) {
 		}
 
 	case *ast.LetClause:
-		a := aliasEntry{source: x}
+		a := aliasEntry{
+			label:   (*letScope)(x),
+			srcExpr: x.Expr,
+			source:  x,
+		}
 		c.insertAlias(x.Ident, a)
 
 	case *ast.Alias:
-		a := aliasEntry{source: x}
+		a := aliasEntry{
+			label:   (*deprecatedAliasScope)(x),
+			srcExpr: x.Expr,
+			source:  x,
+		}
 		c.insertAlias(x.Ident, a)
 	}
 }
@@ -603,14 +634,12 @@ func (c *compiler) addLetDecl(d ast.Decl) {
 		// Cache the parsed expression. Creating a unique expression for each
 		// reference allows the computation to be shared given that we don't
 		// have fields for expressions. This, in turn, prevents exponential
-		// blowup in x2: x1+x1, x3: x2+x2, ... patterns.
-
+		// blowup in x2: x1+x1, x3: x2+x2,  ... patterns.
 		expr := c.labeledExpr(nil, (*letScope)(x), x.Expr)
 		c.updateAlias(x.Ident, expr)
 
 	case *ast.Alias:
 		// TODO(legacy): deprecated, remove this use of Alias
-
 		expr := c.labeledExpr(nil, (*deprecatedAliasScope)(x), x.Expr)
 		c.updateAlias(x.Ident, expr)
 	}
@@ -727,11 +756,14 @@ func (c *compiler) labeledExpr(f *ast.Field, lab labeler, expr ast.Expr) adt.Exp
 	if c.stack[k].field != nil {
 		panic("expected nil field")
 	}
+	saved := c.stack[k]
+
 	c.stack[k].label = lab
 	c.stack[k].field = f
+
 	value := c.expr(expr)
-	c.stack[k].label = nil
-	c.stack[k].field = nil
+
+	c.stack[k] = saved
 	return value
 }
 
@@ -905,8 +937,7 @@ func (c *compiler) expr(expr ast.Expr) adt.Expr {
 		}
 
 	default:
-		panic(fmt.Sprintf("unknown expression type %T", n))
-		// return c.errf(n, "unknown expression type %T", n)
+		return c.errf(n, "%s values not allowed in this position", ast.Name(n))
 	}
 }
 

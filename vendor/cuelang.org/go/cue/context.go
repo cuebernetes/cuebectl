@@ -18,28 +18,18 @@ import (
 	"cuelang.org/go/internal/core/adt"
 	"cuelang.org/go/internal/core/debug"
 	"cuelang.org/go/internal/core/eval"
-	"github.com/cockroachdb/apd/v2"
 )
 
 // context manages evaluation state.
 type context struct {
 	opCtx *adt.OpContext
-	*apd.Context
 	*index
-}
-
-var baseContext apd.Context
-
-func init() {
-	baseContext = apd.BaseContext
-	baseContext.Precision = 24
 }
 
 // newContext returns a new evaluation context.
 func (idx *index) newContext() *context {
 	c := &context{
-		Context: &baseContext,
-		index:   idx,
+		index: idx,
 	}
 	if idx != nil {
 		c.opCtx = eval.NewContext(idx.Runtime, nil)
@@ -55,7 +45,7 @@ func (c *context) str(v adt.Node) string {
 	return debugStr(c, v)
 }
 
-func (c *context) mkErr(src source, args ...interface{}) *bottom {
+func (c *context) mkErr(src adt.Node, args ...interface{}) *adt.Bottom {
 	return c.index.mkErr(src, args...)
 }
 
@@ -76,12 +66,7 @@ func (v Value) eval(ctx *context) adt.Value {
 		panic("undefined value")
 	}
 	x := ctx.manifest(v.v)
-	switch x.Kind() {
-	case adt.StructKind, adt.ListKind:
-		return x
-	default:
-		return x.Value
-	}
+	return x.Value()
 }
 
 // func (v Value) evalFull(u value) (Value, adt.Value) {

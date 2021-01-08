@@ -141,8 +141,11 @@ type Config struct {
 	// the module field of an existing cue.mod file.
 	Module string
 
-	// Package defines the name of the package to be loaded. In this is not set,
-	// the package must be uniquely defined from its context.
+	// Package defines the name of the package to be loaded. If this is not set,
+	// the package must be uniquely defined from its context. Special values:
+	//    _    load files without a package
+	//    *    load all packages. Files without packages are loaded
+	//         in the _ package.
 	Package string
 
 	// Dir is the directory in which to run the build system's query tool
@@ -214,6 +217,9 @@ type Config struct {
 	//
 	// ensures the user may only specify "prod" or "staging".
 	Tags []string
+
+	// Include all files, regardless of tags.
+	AllCUEFiles bool
 
 	// Deprecated: use Tags
 	BuildTags   []string
@@ -528,7 +534,7 @@ func (c Config) complete() (cfg *Config, err error) {
 		}
 
 		r := runtime.New()
-		v, err := compile.Files(nil, r, file)
+		v, err := compile.Files(nil, r, "_", file)
 		if err != nil {
 			return nil, errors.Wrapf(err, token.NoPos, "invalid cue.mod file")
 		}
@@ -536,12 +542,12 @@ func (c Config) complete() (cfg *Config, err error) {
 		v.Finalize(ctx)
 		prefix := v.Lookup(ctx.StringLabel("module"))
 		if prefix != nil {
-			name := ctx.StringValue(prefix.Value)
+			name := ctx.StringValue(prefix.Value())
 			if err := ctx.Err(); err != nil {
 				return &c, err.Err
 			}
 			pos := token.NoPos
-			src := prefix.Value.Source()
+			src := prefix.Value().Source()
 			if src != nil {
 				pos = src.Pos()
 			}

@@ -34,7 +34,6 @@ func (s *subsumer) values(a, b adt.Value) (result bool) {
 	}
 
 	if s.Defaults {
-		a = adt.Default(a)
 		b = adt.Default(b)
 	}
 
@@ -48,8 +47,11 @@ func (s *subsumer) values(a, b adt.Value) (result bool) {
 		if a, ok := a.(*adt.Vertex); ok {
 			return s.vertices(a, b)
 		}
-		// Safe to ignore arcs of w.
-		return s.values(a, b.Value)
+		if v, ok := b.BaseValue.(adt.Value); ok {
+			// Safe to ignore arcs of w.
+			return s.values(a, v)
+		}
+		// Check based on first value.
 
 	case *adt.Conjunction:
 		if _, ok := a.(*adt.Conjunction); ok {
@@ -127,14 +129,15 @@ func (s *subsumer) values(a, b adt.Value) (result bool) {
 
 	case *adt.Vertex:
 		y, ok := b.(*adt.Vertex)
-		if !ok {
-			// 	// Under what conditions can we cast to the value?
-			if len(x.Arcs) == 0 && x.Value != nil {
-				return s.values(x.Value, b)
-			}
-			return false
+		if ok {
+			return s.vertices(x, y)
 		}
-		return s.vertices(x, y)
+
+		// TODO: Under what conditions can we cast to the value?
+		if v, _ := x.BaseValue.(adt.Value); v != nil {
+			return s.values(v, b)
+		}
+		return false
 
 	case *adt.Conjunction:
 		if y, ok := b.(*adt.Conjunction); ok {

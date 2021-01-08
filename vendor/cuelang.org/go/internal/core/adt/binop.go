@@ -16,18 +16,8 @@ package adt
 
 import (
 	"bytes"
-	"math/big"
 	"strings"
-
-	"github.com/cockroachdb/apd/v2"
 )
-
-var apdCtx apd.Context
-
-func init() {
-	apdCtx = apd.BaseContext
-	apdCtx.Precision = 24
-}
 
 // BinOp handles all operations except AndOp and OrOp. This includes processing
 // unary comparators such as '<4' and '=~"foo"'.
@@ -76,7 +66,7 @@ func BinOp(c *OpContext, op Op, left, right Value) Value {
 
 		case leftKind&NumKind != 0 && rightKind&NumKind != 0:
 			// n := c.newNum()
-			return cmpTonode(c, op, c.num(left, op).X.Cmp(&c.num(right, op).X))
+			return cmpTonode(c, op, c.Num(left, op).X.Cmp(&c.Num(right, op).X))
 
 		case leftKind == ListKind && rightKind == ListKind:
 			x := c.Elems(left)
@@ -114,7 +104,7 @@ func BinOp(c *OpContext, op Op, left, right Value) Value {
 
 		case leftKind&NumKind != 0 && rightKind&NumKind != 0:
 			// n := c.newNum()
-			return cmpTonode(c, op, c.num(left, op).X.Cmp(&c.num(right, op).X))
+			return cmpTonode(c, op, c.Num(left, op).X.Cmp(&c.Num(right, op).X))
 
 		case leftKind == ListKind && rightKind == ListKind:
 			x := c.Elems(left)
@@ -143,7 +133,7 @@ func BinOp(c *OpContext, op Op, left, right Value) Value {
 
 		case leftKind&NumKind != 0 && rightKind&NumKind != 0:
 			// n := c.newNum(left, right)
-			return cmpTonode(c, op, c.num(left, op).X.Cmp(&c.num(right, op).X))
+			return cmpTonode(c, op, c.Num(left, op).X.Cmp(&c.Num(right, op).X))
 		}
 
 	case BoolAndOp:
@@ -169,7 +159,7 @@ func BinOp(c *OpContext, op Op, left, right Value) Value {
 	case AddOp:
 		switch {
 		case leftKind&NumKind != 0 && rightKind&NumKind != 0:
-			return numOp(c, apdCtx.Add, left, right, AddOp)
+			return c.Add(c.Num(left, op), c.Num(right, op))
 
 		case leftKind == StringKind && rightKind == StringKind:
 			return c.NewString(c.StringValue(left) + c.StringValue(right))
@@ -183,31 +173,47 @@ func BinOp(c *OpContext, op Op, left, right Value) Value {
 			return c.newBytes(b)
 
 		case leftKind == ListKind && rightKind == ListKind:
-			a := c.Elems(left)
-			b := c.Elems(right)
+			// TODO: get rid of list addition. Semantically it is somewhat
+			// unclear and, as it turns out, it is also hard to get right.
+			// Simulate addition with comprehensions now.
 			if err := c.Err(); err != nil {
 				return err
 			}
-			n := c.newList(c.src, nil)
-			if err := n.appendListArcs(a); err != nil {
-				return err
+
+			x := MakeIdentLabel(c, "x", "")
+
+			forClause := func(src Expr) *ForClause {
+				return &ForClause{
+					Value: x,
+					Src:   src,
+					Dst: &ValueClause{&StructLit{Decls: []Decl{
+						&FieldReference{UpCount: 1, Label: x},
+					}}},
+				}
 			}
-			if err := n.appendListArcs(b); err != nil {
-				return err
+
+			list := &ListLit{
+				Elems: []Elem{
+					forClause(left),
+					forClause(right),
+				},
 			}
-			// n.isList = true
-			// n.IsClosed = true
+
+			n := &Vertex{}
+			n.AddConjunct(MakeRootConjunct(c.Env(0), list))
+			n.Finalize(c)
+
 			return n
 		}
 
 	case SubtractOp:
-		return numOp(c, apdCtx.Sub, left, right, op)
+		return c.Sub(c.Num(left, op), c.Num(right, op))
 
 	case MultiplyOp:
 		switch {
 		// float
 		case leftKind&NumKind != 0 && rightKind&NumKind != 0:
-			return numOp(c, apdCtx.Mul, left, right, op)
+			return c.Mul(c.Num(left, op), c.Num(right, op))
 
 		case leftKind == StringKind && rightKind == IntKind:
 			const as = "string multiplication"
@@ -230,67 +236,56 @@ func BinOp(c *OpContext, op Op, left, right Value) Value {
 			fallthrough
 
 		case leftKind == IntKind && rightKind == ListKind:
-			a := c.Elems(right)
-			n := c.newList(c.src, nil)
-			// n.IsClosed = true
-			index := int64(0)
+			// TODO: get rid of list multiplication.
+
+			list := &ListLit{}
+			x := MakeIdentLabel(c, "x", "")
+
 			for i := c.uint64(left, "list multiplier"); i > 0; i-- {
-				for _, a := range a {
-					f, _ := MakeLabel(a.Source(), index, IntLabel)
-					n.Arcs = append(n.Arcs, &Vertex{
-						Parent:    n,
-						Label:     f,
-						Conjuncts: a.Conjuncts,
-					})
-					index++
-				}
+				list.Elems = append(list.Elems,
+					&ForClause{
+						Value: x,
+						Src:   right,
+						Dst: &ValueClause{&StructLit{Decls: []Decl{
+							&FieldReference{UpCount: 1, Label: x},
+						}}},
+					},
+				)
 			}
+			if err := c.Err(); err != nil {
+				return err
+			}
+
+			n := &Vertex{}
+			n.AddConjunct(MakeRootConjunct(c.Env(0), list))
+			n.Finalize(c)
+
 			return n
 		}
 
 	case FloatQuotientOp:
 		if leftKind&NumKind != 0 && rightKind&NumKind != 0 {
-			v := numOp(c, apdCtx.Quo, left, right, op)
-			if n, ok := v.(*Num); ok {
-				n.K = FloatKind
-			}
-			return v
+			return c.Quo(c.Num(left, op), c.Num(right, op))
 		}
 
 	case IntDivideOp:
 		if leftKind&IntKind != 0 && rightKind&IntKind != 0 {
-			y := c.num(right, op)
-			if y.X.IsZero() {
-				return c.NewErrf("division by zero")
-			}
-			return intOp(c, (*big.Int).Div, c.num(left, op), y)
+			return c.IntDiv(c.Num(left, op), c.Num(right, op))
 		}
 
 	case IntModuloOp:
 		if leftKind&IntKind != 0 && rightKind&IntKind != 0 {
-			y := c.num(right, op)
-			if y.X.IsZero() {
-				return c.NewErrf("division by zero")
-			}
-			return intOp(c, (*big.Int).Mod, c.num(left, op), y)
+			return c.IntMod(c.Num(left, op), c.Num(right, op))
 		}
 
 	case IntQuotientOp:
 		if leftKind&IntKind != 0 && rightKind&IntKind != 0 {
-			y := c.num(right, op)
-			if y.X.IsZero() {
-				return c.NewErrf("division by zero")
-			}
-			return intOp(c, (*big.Int).Quo, c.num(left, op), y)
+			return c.IntQuo(c.Num(left, op), c.Num(right, op))
 		}
 
 	case IntRemainderOp:
 		if leftKind&IntKind != 0 && rightKind&IntKind != 0 {
-			y := c.num(right, op)
-			if y.X.IsZero() {
-				return c.NewErrf("division by zero")
-			}
-			return intOp(c, (*big.Int).Rem, c.num(left, op), y)
+			return c.IntRem(c.Num(left, op), c.Num(right, op))
 		}
 	}
 
@@ -315,46 +310,4 @@ func cmpTonode(c *OpContext, op Op, r int) Value {
 		result = r == 1
 	}
 	return c.newBool(result)
-}
-
-type numFunc func(z, x, y *apd.Decimal) (apd.Condition, error)
-
-func numOp(c *OpContext, fn numFunc, a, b Value, op Op) Value {
-	var d apd.Decimal
-	x := c.num(a, op)
-	y := c.num(b, op)
-	cond, err := fn(&d, &x.X, &y.X)
-	if err != nil {
-		return c.NewErrf("failed arithmetic: %v", err)
-	}
-	if cond.DivisionByZero() {
-		return c.NewErrf("division by zero")
-	}
-	k := x.Kind() & y.Kind()
-	if k == 0 {
-		k = FloatKind
-	}
-	return c.newNum(&d, k)
-}
-
-type intFunc func(z, x, y *big.Int) *big.Int
-
-func intOp(c *OpContext, fn intFunc, a, b *Num) Value {
-	var d apd.Decimal
-
-	var x, y apd.Decimal
-	_, _ = apdCtx.RoundToIntegralValue(&x, &a.X)
-	if x.Negative {
-		x.Coeff.Neg(&x.Coeff)
-	}
-	_, _ = apdCtx.RoundToIntegralValue(&y, &b.X)
-	if y.Negative {
-		y.Coeff.Neg(&y.Coeff)
-	}
-	fn(&d.Coeff, &x.Coeff, &y.Coeff)
-	if d.Coeff.Sign() < 0 {
-		d.Coeff.Neg(&d.Coeff)
-		d.Negative = true
-	}
-	return c.newNum(&d, IntKind)
 }

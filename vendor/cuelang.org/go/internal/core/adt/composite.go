@@ -178,9 +178,9 @@ type Vertex struct {
 	// SelfCount is used for tracking self-references.
 	SelfCount int
 
-	// Value is the value associated with this vertex. For lists and structs
+	// BaseValue is the value associated with this vertex. For lists and structs
 	// this is a sentinel value indicating its kind.
-	Value Value
+	BaseValue BaseValue
 
 	// ChildErrors is the collection of all errors of children.
 	ChildErrors *Bottom
@@ -246,13 +246,32 @@ func (v *Vertex) Status() VertexStatus {
 }
 
 func (v *Vertex) UpdateStatus(s VertexStatus) {
-	if v.status > s+1 {
-		panic(fmt.Sprintf("attempt to regress status from %d to %d", v.Status(), s))
-	}
-	if s == Finalized && v.Value == nil {
+	Assertf(v.status <= s+1, "attempt to regress status from %d to %d", v.Status(), s)
+
+	if s == Finalized && v.BaseValue == nil {
 		// panic("not finalized")
 	}
 	v.status = s
+}
+
+// Value returns the Value of v without definitions if it is a scalar
+// or itself otherwise.
+func (v *Vertex) Value() Value {
+	// TODO: rename to Value.
+	switch x := v.BaseValue.(type) {
+	case nil:
+		return nil
+	case *StructMarker, *ListMarker:
+		return v
+	case Value:
+		return x
+	default:
+		panic(fmt.Sprintf("unexpected type %T", v.BaseValue))
+	}
+}
+
+func (x *Vertex) IsConcrete() bool {
+	return x.Concreteness() <= Concrete
 }
 
 // IsData reports whether v should be interpreted in data mode. In other words,
@@ -282,7 +301,7 @@ func (v *Vertex) ToDataAll() *Vertex {
 	}
 	w := *v
 
-	w.Value = toDataAll(w.Value)
+	w.BaseValue = toDataAll(w.BaseValue)
 	w.Arcs = arcs
 	w.isData = true
 	w.Conjuncts = make([]Conjunct, len(v.Conjuncts))
@@ -290,14 +309,14 @@ func (v *Vertex) ToDataAll() *Vertex {
 	for i, c := range w.Conjuncts {
 		w.Conjuncts[i].CloseID = 0
 		if v, _ := c.x.(Value); v != nil {
-			w.Conjuncts[i].x = toDataAll(v)
+			w.Conjuncts[i].x = toDataAll(v).(Value)
 		}
 	}
 	w.Closed = nil
 	return &w
 }
 
-func toDataAll(v Value) Value {
+func toDataAll(v BaseValue) BaseValue {
 	switch x := v.(type) {
 	default:
 		return x
@@ -319,7 +338,8 @@ func toDataAll(v Value) Value {
 		c := *x
 		c.Values = make([]Value, len(x.Values))
 		for i, v := range x.Values {
-			c.Values[i] = toDataAll(v)
+			// This case is okay because the source is of type Value.
+			c.Values[i] = toDataAll(v).(Value)
 		}
 		return &c
 	}
@@ -331,7 +351,7 @@ func toDataAll(v Value) Value {
 
 func (v *Vertex) IsErr() bool {
 	// if v.Status() > Evaluating {
-	if _, ok := v.Value.(*Bottom); ok {
+	if _, ok := v.BaseValue.(*Bottom); ok {
 		return true
 	}
 	// }
@@ -340,7 +360,7 @@ func (v *Vertex) IsErr() bool {
 
 func (v *Vertex) Err(c *OpContext, state VertexStatus) *Bottom {
 	c.Unify(c, v, state)
-	if b, ok := v.Value.(*Bottom); ok {
+	if b, ok := v.BaseValue.(*Bottom); ok {
 		return b
 	}
 	return nil
@@ -353,12 +373,12 @@ func (v *Vertex) Finalize(c *OpContext) {
 }
 
 func (v *Vertex) AddErr(ctx *OpContext, b *Bottom) {
-	v.Value = CombineErrors(nil, v.Value, b)
+	v.BaseValue = CombineErrors(nil, v.Value(), b)
 	v.UpdateStatus(Finalized)
 }
 
-func (v *Vertex) SetValue(ctx *OpContext, state VertexStatus, value Value) *Bottom {
-	v.Value = value
+func (v *Vertex) SetValue(ctx *OpContext, state VertexStatus, value BaseValue) *Bottom {
+	v.BaseValue = value
 	v.UpdateStatus(state)
 	return nil
 }
@@ -370,8 +390,8 @@ func ToVertex(v Value) *Vertex {
 		return x
 	default:
 		n := &Vertex{
-			status: Finalized,
-			Value:  x,
+			status:    Finalized,
+			BaseValue: x,
 		}
 		n.AddConjunct(MakeRootConjunct(nil, v))
 		return n
@@ -385,12 +405,7 @@ func Unwrap(v Value) Value {
 	if !ok {
 		return v
 	}
-	switch x.Value.(type) {
-	case *StructMarker, *ListMarker:
-		return v
-	default:
-		return x.Value
-	}
+	return x.Value()
 }
 
 // Acceptor is a single interface that reports whether feature f is a valid
@@ -410,6 +425,10 @@ type Acceptor interface {
 	// OptionalTypes returns a bit field with the type of optional constraints
 	// that are represented by this Acceptor.
 	OptionalTypes() OptionalType
+
+	// IsOptional reports whether a field is explicitly defined as optional,
+	// as opposed to whether it is allowed by a pattern constraint.
+	IsOptional(f Feature) bool
 }
 
 // OptionalType is a bit field of the type of optional constraints in use by an
@@ -427,10 +446,10 @@ const (
 func (v *Vertex) Kind() Kind {
 	// This is possible when evaluating comprehensions. It is potentially
 	// not known at this time what the type is.
-	if v.Value == nil {
+	if v.BaseValue == nil {
 		return TopKind
 	}
-	return v.Value.Kind()
+	return v.BaseValue.Kind()
 }
 
 func (v *Vertex) OptionalTypes() OptionalType {
@@ -445,7 +464,7 @@ func (v *Vertex) OptionalTypes() OptionalType {
 }
 
 func (v *Vertex) IsClosed(ctx *OpContext) bool {
-	switch x := v.Value.(type) {
+	switch x := v.BaseValue.(type) {
 	case *ListMarker:
 		// TODO: use one mechanism.
 		if x.IsOpen {
@@ -489,7 +508,7 @@ func (v *Vertex) MatchAndInsert(ctx *OpContext, arc *Vertex) {
 }
 
 func (v *Vertex) IsList() bool {
-	_, ok := v.Value.(*ListMarker)
+	_, ok := v.BaseValue.(*ListMarker)
 	return ok
 }
 
@@ -531,7 +550,7 @@ func (v *Vertex) Source() ast.Node { return nil }
 
 // AddConjunct adds the given Conjuncts to v if it doesn't already exist.
 func (v *Vertex) AddConjunct(c Conjunct) *Bottom {
-	if v.Value != nil {
+	if v.BaseValue != nil {
 		// TODO: investigate why this happens at all. Removing it seems to
 		// change the order of fields in some cases.
 		//
@@ -565,24 +584,11 @@ func appendPath(a []Feature, v *Vertex) []Feature {
 		return a
 	}
 	a = appendPath(a, v.Parent)
-	return append(a, v.Label)
-}
-
-func (v *Vertex) appendListArcs(arcs []*Vertex) (err *Bottom) {
-	for _, a := range arcs {
-		// TODO(list): BUG this only works if lists do not have definitions
-		// fields.
-		label, err := MakeLabel(a.Source(), int64(len(v.Arcs)), IntLabel)
-		if err != nil {
-			return &Bottom{Src: a.Source(), Err: err}
-		}
-		v.Arcs = append(v.Arcs, &Vertex{
-			Parent:    v,
-			Label:     label,
-			Conjuncts: a.Conjuncts,
-		})
+	if v.Label != 0 {
+		// A Label may be 0 for programmatically inserted nodes.
+		a = append(a, v.Label)
 	}
-	return nil
+	return a
 }
 
 // An Conjunct is an Environment-Expr pair. The Environment is the starting

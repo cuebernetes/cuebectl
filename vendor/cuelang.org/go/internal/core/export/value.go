@@ -29,7 +29,7 @@ func (e *exporter) bareValue(v adt.Value) ast.Expr {
 	case *adt.Vertex:
 		return e.vertex(x)
 	case adt.Value:
-		a := &adt.Vertex{Value: x}
+		a := &adt.Vertex{BaseValue: x}
 		return e.vertex(a)
 	default:
 		panic("unreachable")
@@ -41,30 +41,50 @@ func (e *exporter) bareValue(v adt.Value) ast.Expr {
 // value with a reference in graph mode.
 
 func (e *exporter) vertex(n *adt.Vertex) (result ast.Expr) {
-	switch x := n.Value.(type) {
+	switch x := n.BaseValue.(type) {
 	case nil:
 		// bare
 	case *adt.StructMarker:
 		result = e.structComposite(n)
 
 	case *adt.ListMarker:
-		result = e.listComposite(n)
+		if e.showArcs(n) {
+			result = e.structComposite(n)
+		} else {
+			result = e.listComposite(n)
+		}
 
 	case *adt.Bottom:
-		if !x.IsIncomplete() || len(n.Conjuncts) == 0 {
+		switch {
+		case e.cfg.ShowErrors && x.ChildError:
+			// TODO(perf): use precompiled arc statistics
+			if len(n.Arcs) > 0 && n.Arcs[0].Label.IsInt() && !e.showArcs(n) {
+				result = e.listComposite(n)
+			} else {
+				result = e.structComposite(n)
+			}
+
+		case !x.IsIncomplete() || len(n.Conjuncts) == 0:
 			result = e.bottom(x)
-			break
+
+		default:
+			// fall back to expression mode
+			a := []ast.Expr{}
+			for _, c := range n.Conjuncts {
+				a = append(a, e.expr(c.Expr()))
+			}
+			result = ast.NewBinExpr(token.AND, a...)
 		}
 
-		// fall back to expression mode
-		a := []ast.Expr{}
-		for _, c := range n.Conjuncts {
-			a = append(a, e.expr(c.Expr()))
+	case adt.Value:
+		if e.showArcs(n) {
+			result = e.structComposite(n)
+		} else {
+			result = e.value(x, n.Conjuncts...)
 		}
-		result = ast.NewBinExpr(token.AND, a...)
 
 	default:
-		result = e.value(n.Value, n.Conjuncts...)
+		panic("unknow value")
 	}
 	return result
 }
@@ -246,7 +266,7 @@ func (e *exporter) bytes(n *adt.Bytes, orig []adt.Conjunct) *ast.BasicLit {
 	if b := extractBasic(orig); b != nil {
 		return b
 	}
-	s := literal.String.WithOptionalTabIndent(len(e.stack)).Quote(string(n.B))
+	s := literal.Bytes.WithOptionalTabIndent(len(e.stack)).Quote(string(n.B))
 	return &ast.BasicLit{
 		Kind:  token.STRING,
 		Value: s,
@@ -297,6 +317,22 @@ func (e *exporter) listComposite(v *adt.Vertex) ast.Expr {
 	return l
 }
 
+func (e exporter) showArcs(v *adt.Vertex) bool {
+	p := e.cfg
+	if !p.ShowHidden && !p.ShowDefinitions {
+		return false
+	}
+	for _, a := range v.Arcs {
+		switch {
+		case a.Label.IsDef() && p.ShowDefinitions:
+			return true
+		case a.Label.IsHidden() && p.ShowHidden:
+			return true
+		}
+	}
+	return false
+}
+
 func (e *exporter) structComposite(v *adt.Vertex) ast.Expr {
 	s, saved := e.pushFrame(v.Conjuncts)
 	e.top().upCount++
@@ -305,16 +341,55 @@ func (e *exporter) structComposite(v *adt.Vertex) ast.Expr {
 		e.popFrame(saved)
 	}()
 
+	showRegular := false
+	switch x := v.BaseValue.(type) {
+	case *adt.StructMarker:
+		showRegular = true
+	case *adt.ListMarker:
+		// As lists may be long, put them at the end.
+		defer e.addEmbed(e.listComposite(v))
+	case *adt.Bottom:
+		if !e.cfg.ShowErrors || !x.ChildError {
+			// Should not be reachable, but just in case. The output will be
+			// correct.
+			e.addEmbed(e.value(x))
+			return s
+		}
+		// Always also show regular fields, even when list, as we are in
+		// debugging mode.
+		showRegular = true
+		// TODO(perf): do something better
+		for _, a := range v.Arcs {
+			if a.Label.IsInt() {
+				defer e.addEmbed(e.listComposite(v))
+				break
+			}
+		}
+
+	case adt.Value:
+		e.addEmbed(e.value(x))
+	}
+
 	p := e.cfg
 	for _, label := range VertexFeatures(v) {
-		if label.IsDef() && !p.ShowDefinitions {
+		show := false
+		switch label.Typ() {
+		case adt.StringLabel:
+			show = showRegular
+		case adt.IntLabel:
 			continue
+		case adt.DefinitionLabel:
+			show = p.ShowDefinitions
+		case adt.HiddenLabel, adt.HiddenDefinitionLabel:
+			show = p.ShowHidden && label.PkgID(e.ctx) == e.pkgID
 		}
-		if label.IsHidden() && !p.ShowHidden {
+		if !show {
 			continue
 		}
 
 		f := &ast.Field{Label: e.stringLabel(label)}
+
+		e.addField(label, f, f.Value)
 
 		if label.IsDef() {
 			e.inDefinition++

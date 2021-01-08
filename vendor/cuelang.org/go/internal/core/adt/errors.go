@@ -130,7 +130,7 @@ func isIncomplete(v *Vertex) bool {
 	if v == nil {
 		return true
 	}
-	if b, ok := v.Value.(*Bottom); ok {
+	if b, ok := v.BaseValue.(*Bottom); ok {
 		return b.IsIncomplete()
 	}
 	return false
@@ -148,12 +148,12 @@ func (v *Vertex) AddChildError(recursive *Bottom) {
 	if recursive.IsIncomplete() {
 		return
 	}
-	x := v.Value
+	x := v.BaseValue
 	err, _ := x.(*Bottom)
 	if err == nil {
-		v.Value = &Bottom{
+		v.BaseValue = &Bottom{
 			Code:         recursive.Code,
-			Value:        x,
+			Value:        v,
 			HasRecursive: true,
 			ChildError:   true,
 			Err:          recursive.Err,
@@ -166,7 +166,7 @@ func (v *Vertex) AddChildError(recursive *Bottom) {
 		err.Code = recursive.Code
 	}
 
-	v.Value = err
+	v.BaseValue = err
 }
 
 // CombineErrors combines two errors that originate at the same Vertex.

@@ -28,7 +28,6 @@ import (
 	"cuelang.org/go/cue/errors"
 	"cuelang.org/go/cue/token"
 	"cuelang.org/go/internal"
-	"golang.org/x/xerrors"
 )
 
 type buildContext struct {
@@ -564,7 +563,7 @@ func (b *builder) disjunction(a []cue.Value, f typeFunc) {
 				continue
 			}
 			err := v.Subsume(w, cue.Schema())
-			if err == nil || xerrors.Is(err, internal.ErrInexact) {
+			if err == nil || errors.Is(err, internal.ErrInexact) {
 				subsumed = append(subsumed, schemas[j])
 			}
 		}
@@ -793,7 +792,7 @@ func (b *builder) array(v cue.Value) {
 	case cue.CallOp:
 		name := fmt.Sprint(a[0])
 		switch name {
-		case "list.UniqueItems":
+		case "list.UniqueItems", "list.UniqueItems()":
 			b.checkArgs(a, 0)
 			b.setFilter("Schema", "uniqueItems", ast.NewBool(true))
 			return

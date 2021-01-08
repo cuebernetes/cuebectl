@@ -30,7 +30,6 @@ import (
 	"cuelang.org/go/cue/literal"
 	"cuelang.org/go/internal"
 	"cuelang.org/go/internal/core/adt"
-	"golang.org/x/xerrors"
 )
 
 const (
@@ -85,8 +84,19 @@ func (w *printer) label(f adt.Feature) {
 	w.string(w.labelString(f))
 }
 
+func (w *printer) ident(f adt.Feature) {
+	w.string(f.IdentString(w.index))
+}
+
 // TODO: fold into label once :: is no longer supported.
 func (w *printer) labelString(f adt.Feature) string {
+	if f.IsHidden() {
+		ident := f.IdentString(w.index)
+		if pkgName := f.PkgID(w.index); pkgName != "main" {
+			ident = fmt.Sprintf("%s(%s)", ident, pkgName)
+		}
+		return ident
+	}
 	return f.SelectorString(w.index)
 }
 
@@ -95,7 +105,7 @@ func (w *printer) shortError(errs errors.Error) {
 		msg, args := errs.Msg()
 		fmt.Fprintf(w, msg, args...)
 
-		err := xerrors.Unwrap(errs)
+		err := errors.Unwrap(errs)
 		if err == nil {
 			break
 		}
@@ -141,8 +151,8 @@ func (w *printer) node(n adt.Node) {
 	switch x := n.(type) {
 	case *adt.Vertex:
 		var kind adt.Kind
-		if x.Value != nil {
-			kind = x.Value.Kind()
+		if x.BaseValue != nil {
+			kind = x.BaseValue.Kind()
 		}
 
 		kindStr := kind.String()
@@ -160,7 +170,7 @@ func (w *printer) node(n adt.Node) {
 		w.indent += "  "
 		defer func() { w.indent = saved }()
 
-		switch v := x.Value.(type) {
+		switch v := x.BaseValue.(type) {
 		case nil:
 		case *adt.Bottom:
 			// TODO: reuse bottom.
@@ -187,15 +197,15 @@ func (w *printer) node(n adt.Node) {
 			// 	// return
 			// }
 
-		default:
+		case adt.Value:
 			if len(x.Arcs) == 0 {
 				w.string(" ")
-				w.node(x.Value)
+				w.node(v)
 				w.string(" }")
 				return
 			}
 			w.string("\n")
-			w.node(x.Value)
+			w.node(v)
 		}
 
 		for _, a := range x.Arcs {
@@ -205,7 +215,7 @@ func (w *printer) node(n adt.Node) {
 			w.node(a)
 		}
 
-		if x.Value == nil {
+		if x.BaseValue == nil {
 			w.indent += "// "
 			w.string("// ")
 			for i, c := range x.Conjuncts {
@@ -372,7 +382,7 @@ func (w *printer) node(n adt.Node) {
 		w.string(openTuple)
 		w.string(strconv.Itoa(int(x.UpCount)))
 		w.string(";let ")
-		w.label(x.Label)
+		w.ident(x.Label)
 		w.string(closeTuple)
 
 	case *adt.SelectorExpr:
@@ -484,9 +494,9 @@ func (w *printer) node(n adt.Node) {
 
 	case *adt.ForClause:
 		w.string("for ")
-		w.label(x.Key)
+		w.ident(x.Key)
 		w.string(", ")
-		w.label(x.Value)
+		w.ident(x.Value)
 		w.string(" in ")
 		w.node(x.Src)
 		w.string(" ")
@@ -500,7 +510,7 @@ func (w *printer) node(n adt.Node) {
 
 	case *adt.LetClause:
 		w.string("let ")
-		w.label(x.Label)
+		w.ident(x.Label)
 		w.string(" = ")
 		w.node(x.Expr)
 		w.string(" ")

@@ -172,14 +172,14 @@ var _ errors.Error = &marshalError{}
 
 type marshalError struct {
 	err errors.Error
-	b   *bottom
+	b   *adt.Bottom
 }
 
-func toMarshalErr(v Value, b *bottom) error {
+func toMarshalErr(v Value, b *adt.Bottom) error {
 	return &marshalError{v.toErr(b), b}
 }
 
-func marshalErrf(v Value, src source, code errCode, msg string, args ...interface{}) error {
+func marshalErrf(v Value, src adt.Node, code errCode, msg string, args ...interface{}) error {
 	arguments := append([]interface{}{code, msg}, args...)
 	b := v.idx.mkErr(src, arguments...)
 	return toMarshalErr(v, b)
@@ -218,7 +218,7 @@ type Iterator struct {
 	arcs  []field
 	p     int
 	cur   Value
-	f     label
+	f     adt.Feature
 	isOpt bool
 }
 
@@ -298,13 +298,13 @@ func marshalList(l *Iterator) (b []byte, err errors.Error) {
 	return b, nil
 }
 
-func (v Value) getNum(k kind) (*numLit, errors.Error) {
+func (v Value) getNum(k adt.Kind) (*adt.Num, errors.Error) {
 	v, _ = v.Default()
 	ctx := v.ctx()
 	if err := v.checkKind(ctx, k); err != nil {
 		return nil, v.toErr(err)
 	}
-	n, _ := v.eval(ctx).(*numLit)
+	n, _ := v.eval(ctx).(*adt.Num)
 	return n, nil
 }
 
@@ -317,7 +317,7 @@ func (v Value) getNum(k kind) (*numLit, errors.Error) {
 // 200 and exp == -2. Calling MantExp with a nil argument is an efficient way to
 // get the exponent of the receiver.
 func (v Value) MantExp(mant *big.Int) (exp int, err error) {
-	n, err := v.getNum(numKind)
+	n, err := v.getNum(adt.NumKind)
 	if err != nil {
 		return 0, err
 	}
@@ -336,7 +336,7 @@ func (v Value) MantExp(mant *big.Int) (exp int, err error) {
 // Decimal is for internal use only. The Decimal type that is returned is
 // subject to change.
 func (v Value) Decimal() (d *internal.Decimal, err error) {
-	n, err := v.getNum(numKind)
+	n, err := v.getNum(adt.NumKind)
 	if err != nil {
 		return nil, err
 	}
@@ -357,7 +357,7 @@ func (v Value) AppendInt(buf []byte, base int) ([]byte, error) {
 // AppendFloat appends to buf the string form of the floating-point number x.
 // It returns an error if v is not a number.
 func (v Value) AppendFloat(buf []byte, fmt byte, prec int) ([]byte, error) {
-	n, err := v.getNum(numKind)
+	n, err := v.getNum(adt.NumKind)
 	if err != nil {
 		return nil, err
 	}
@@ -395,7 +395,7 @@ var (
 // argument z is provided, Int stores the result in z instead of allocating a
 // new Int.
 func (v Value) Int(z *big.Int) (*big.Int, error) {
-	n, err := v.getNum(intKind)
+	n, err := v.getNum(adt.IntKind)
 	if err != nil {
 		return nil, err
 	}
@@ -417,7 +417,7 @@ func (v Value) Int(z *big.Int) (*big.Int, error) {
 // as an int64. The result is (math.MinInt64, ErrAbove) for x < math.MinInt64,
 // and (math.MaxInt64, ErrBelow) for x > math.MaxInt64.
 func (v Value) Int64() (int64, error) {
-	n, err := v.getNum(intKind)
+	n, err := v.getNum(adt.IntKind)
 	if err != nil {
 		return 0, err
 	}
@@ -439,7 +439,7 @@ func (v Value) Int64() (int64, error) {
 // as a uint64. The result is (0, ErrAbove) for x < 0, and
 // (math.MaxUint64, ErrBelow) for x > math.MaxUint64.
 func (v Value) Uint64() (uint64, error) {
-	n, err := v.getNum(intKind)
+	n, err := v.getNum(adt.IntKind)
 	if err != nil {
 		return 0, err
 	}
@@ -513,7 +513,7 @@ func init() {
 // by a float64 (|x| > math.MaxFloat64), the result is (+Inf, ErrAbove) or
 // (-Inf, ErrBelow), depending on the sign of x.
 func (v Value) Float64() (float64, error) {
-	n, err := v.getNum(numKind)
+	n, err := v.getNum(adt.NumKind)
 	if err != nil {
 		return 0, err
 	}
@@ -551,7 +551,7 @@ func (v Value) appendPath(a []string) []string {
 			}
 			a = append(a, label)
 		default:
-			a = append(a, f.SelectorString(v.idx.Index))
+			a = append(a, f.SelectorString(v.idx.Runtime))
 		}
 	}
 	return a
@@ -564,8 +564,8 @@ type Value struct {
 	v   *adt.Vertex
 }
 
-func newErrValue(v Value, b *bottom) Value {
-	node := &adt.Vertex{Value: b}
+func newErrValue(v Value, b *adt.Bottom) Value {
+	node := &adt.Vertex{BaseValue: b}
 	if v.v != nil {
 		node.Label = v.v.Label
 		node.Parent = v.v.Parent
@@ -586,7 +586,7 @@ func newVertexRoot(ctx *context, x *adt.Vertex) Value {
 	return makeValue(ctx.index, x)
 }
 
-func newValueRoot(ctx *context, x value) Value {
+func newValueRoot(ctx *context, x adt.Expr) Value {
 	if n, ok := x.(*adt.Vertex); ok {
 		return newVertexRoot(ctx, n)
 	}
@@ -635,14 +635,14 @@ func MakeValue(ctx *adt.OpContext, v adt.Value) Value {
 }
 
 func makeValue(idx *index, v *adt.Vertex) Value {
-	if v.Status() == 0 || v.Value == nil {
+	if v.Status() == 0 || v.BaseValue == nil {
 		panic(fmt.Sprintf("not properly initialized (state: %v, value: %T)",
-			v.Status(), v.Value))
+			v.Status(), v.BaseValue))
 	}
 	return Value{idx, v}
 }
 
-func remakeValue(base Value, env *adt.Environment, v value) Value {
+func remakeValue(base Value, env *adt.Environment, v adt.Expr) Value {
 	// TODO: right now this is necessary because disjunctions do not have
 	// populated conjuncts.
 	if v, ok := v.(*adt.Vertex); ok && v.Status() >= adt.Partial {
@@ -656,7 +656,7 @@ func remakeValue(base Value, env *adt.Environment, v value) Value {
 }
 
 func remakeFinal(base Value, env *adt.Environment, v adt.Value) Value {
-	n := &adt.Vertex{Parent: base.v.Parent, Label: base.v.Label, Value: v}
+	n := &adt.Vertex{Parent: base.v.Parent, Label: base.v.Label, BaseValue: v}
 	n.UpdateStatus(adt.Finalized)
 	return makeValue(base.idx, n)
 }
@@ -665,7 +665,7 @@ func (v Value) ctx() *context {
 	return v.idx.newContext()
 }
 
-func (v Value) makeChild(ctx *context, i uint32, a arc) Value {
+func (v Value) makeChild(ctx *context, i uint32, a *adt.Vertex) Value {
 	a.Parent = v.v
 	return makeValue(v.idx, a)
 }
@@ -843,8 +843,8 @@ func (v Value) Kind() Kind {
 	if v.v == nil {
 		return BottomKind
 	}
-	c := v.v.Value
-	if !adt.IsConcrete(c) {
+	c := v.v.BaseValue
+	if !v.v.IsConcrete() {
 		return BottomKind
 	}
 	if v.IncompleteKind() == adt.ListKind && !v.IsClosed() {
@@ -887,29 +887,29 @@ func (v Value) marshalJSON() (b []byte, err error) {
 
 	// TODO: implement marshalles in value.
 	switch k := x.Kind(); k {
-	case nullKind:
+	case adt.NullKind:
 		return json.Marshal(nil)
-	case boolKind:
-		return json.Marshal(x.(*boolLit).B)
-	case intKind, floatKind, numKind:
-		b, err := x.(*numLit).X.MarshalText()
+	case adt.BoolKind:
+		return json.Marshal(x.(*adt.Bool).B)
+	case adt.IntKind, adt.FloatKind, adt.NumKind:
+		b, err := x.(*adt.Num).X.MarshalText()
 		b = bytes.TrimLeft(b, "+")
 		return b, err
-	case stringKind:
-		return json.Marshal(x.(*stringLit).Str)
-	case bytesKind:
-		return json.Marshal(x.(*bytesLit).B)
-	case listKind:
+	case adt.StringKind:
+		return json.Marshal(x.(*adt.String).Str)
+	case adt.BytesKind:
+		return json.Marshal(x.(*adt.Bytes).B)
+	case adt.ListKind:
 		i, _ := v.List()
 		return marshalList(&i)
-	case structKind:
+	case adt.StructKind:
 		obj, err := v.structValData(ctx)
 		if err != nil {
 			return nil, toMarshalErr(v, err)
 		}
 		return obj.marshalJSON()
-	case bottomKind:
-		return nil, toMarshalErr(v, x.(*bottom))
+	case adt.BottomKind:
+		return nil, toMarshalErr(v, x.(*adt.Bottom))
 	default:
 		return nil, marshalErrf(v, x, 0, "cannot convert value %q of type %T to JSON", ctx.str(x), x)
 	}
@@ -937,27 +937,52 @@ func (v Value) Syntax(opts ...Option) ast.Node {
 		ShowDocs:        o.docs,
 	}
 
+	pkgID := v.instance().ID()
+
+	bad := func(name string, err error) ast.Node {
+		const format = `"%s: internal error
+Error: %s
+
+Profile:
+%#v
+
+Value:
+%v
+
+You could file a bug with the above information at:
+    https://github.com/cuelang/cue/issues/new?assignees=&labels=NeedsInvestigation&template=bug_report.md&title=.
+`
+		cg := &ast.CommentGroup{Doc: true}
+		msg := fmt.Sprintf(format, name, err, p, v)
+		for _, line := range strings.Split(msg, "\n") {
+			cg.List = append(cg.List, &ast.Comment{Text: "// " + line})
+		}
+		x := &ast.BadExpr{}
+		ast.AddComment(x, cg)
+		return x
+	}
+
 	// var expr ast.Expr
 	var err error
 	var f *ast.File
 	if o.concrete || o.final {
 		// inst = v.instance()
 		var expr ast.Expr
-		expr, err = p.Value(v.idx.Runtime, v.v)
+		expr, err = p.Value(v.idx.Runtime, pkgID, v.v)
 		if err != nil {
-			return nil
+			return bad(`"cuelang.org/go/internal/core/export".Value`, err)
 		}
 
 		// This introduces gratuitous unshadowing!
 		f, err = astutil.ToFile(expr)
 		if err != nil {
-			return nil
+			return bad(`"cuelang.org/go/ast/astutil".ToFile`, err)
 		}
 		// return expr
 	} else {
-		f, err = p.Def(v.idx.Runtime, v.v)
+		f, err = p.Def(v.idx.Runtime, pkgID, v.v)
 		if err != nil {
-			panic(err)
+			return bad(`"cuelang.org/go/internal/core/export".Def`, err)
 		}
 	}
 
@@ -1036,12 +1061,12 @@ func (v Value) Source() ast.Node {
 	if len(v.v.Conjuncts) == 1 {
 		return v.v.Conjuncts[0].Source()
 	}
-	return v.v.Value.Source()
+	return v.v.Value().Source()
 }
 
 // Err returns the error represented by v or nil v is not an error.
 func (v Value) Err() error {
-	if err := v.checkKind(v.ctx(), bottomKind); err != nil {
+	if err := v.checkKind(v.ctx(), adt.BottomKind); err != nil {
 		return v.toErr(err)
 	}
 	return nil
@@ -1075,7 +1100,7 @@ func (v Value) IsConcrete() bool {
 	if v.v == nil {
 		return false // any is neither concrete, not a list or struct.
 	}
-	if b, ok := v.v.Value.(*adt.Bottom); ok {
+	if b, ok := v.v.BaseValue.(*adt.Bottom); ok {
 		return !b.IsIncomplete()
 	}
 	if !adt.IsConcrete(v.v) {
@@ -1100,21 +1125,24 @@ func (v Value) Exists() bool {
 	if v.v == nil {
 		return false
 	}
-	return exists(v.v.Value)
+	if err, ok := v.v.BaseValue.(*adt.Bottom); ok {
+		return err.Code != codeNotExist
+	}
+	return true
 }
 
-func (v Value) checkKind(ctx *context, want kind) *bottom {
+func (v Value) checkKind(ctx *context, want adt.Kind) *adt.Bottom {
 	if v.v == nil {
 		return errNotExists
 	}
 	// TODO: use checkKind
 	x := v.eval(ctx)
-	if b, ok := x.(*bottom); ok {
+	if b, ok := x.(*adt.Bottom); ok {
 		return b
 	}
 	k := x.Kind()
-	if want != bottomKind {
-		if k&want == bottomKind {
+	if want != adt.BottomKind {
+		if k&want == adt.BottomKind {
 			return ctx.mkErr(x, "cannot use value %v (type %s) as %s",
 				ctx.opCtx.Str(x), k, want)
 		}
@@ -1126,7 +1154,7 @@ func (v Value) checkKind(ctx *context, want kind) *bottom {
 }
 
 func makeInt(v Value, x int64) Value {
-	n := &adt.Num{K: intKind}
+	n := &adt.Num{K: adt.IntKind}
 	n.X.SetInt64(int64(x))
 	return remakeFinal(v, nil, n)
 }
@@ -1140,7 +1168,7 @@ func (v Value) Len() Value {
 		case *adt.Vertex:
 			if x.IsList() {
 				ctx := v.ctx()
-				n := &adt.Num{K: intKind}
+				n := &adt.Num{K: adt.IntKind}
 				n.X.SetInt64(int64(len(x.Elems())))
 				if x.IsClosed(ctx.opCtx) {
 					return remakeFinal(v, nil, n)
@@ -1156,9 +1184,9 @@ func (v Value) Len() Value {
 				return remakeFinal(v, nil, c)
 
 			}
-		case *bytesLit:
+		case *adt.Bytes:
 			return makeInt(v, int64(len(x.B)))
-		case *stringLit:
+		case *adt.String:
 			return makeInt(v, int64(len([]rune(x.Str))))
 		}
 	}
@@ -1223,7 +1251,7 @@ func (v Value) Elem() (Value, bool) {
 func (v Value) List() (Iterator, error) {
 	v, _ = v.Default()
 	ctx := v.ctx()
-	if err := v.checkKind(ctx, listKind); err != nil {
+	if err := v.checkKind(ctx, adt.ListKind); err != nil {
 		return Iterator{ctx: ctx}, v.toErr(err)
 	}
 	arcs := []field{}
@@ -1238,7 +1266,7 @@ func (v Value) List() (Iterator, error) {
 // Null reports an error if v is not null.
 func (v Value) Null() error {
 	v, _ = v.Default()
-	if err := v.checkKind(v.ctx(), nullKind); err != nil {
+	if err := v.checkKind(v.ctx(), adt.NullKind); err != nil {
 		return v.toErr(err)
 	}
 	return nil
@@ -1253,20 +1281,20 @@ func (v Value) Null() error {
 func (v Value) Bool() (bool, error) {
 	v, _ = v.Default()
 	ctx := v.ctx()
-	if err := v.checkKind(ctx, boolKind); err != nil {
+	if err := v.checkKind(ctx, adt.BoolKind); err != nil {
 		return false, v.toErr(err)
 	}
-	return v.eval(ctx).(*boolLit).B, nil
+	return v.eval(ctx).(*adt.Bool).B, nil
 }
 
 // String returns the string value if v is a string or an error otherwise.
 func (v Value) String() (string, error) {
 	v, _ = v.Default()
 	ctx := v.ctx()
-	if err := v.checkKind(ctx, stringKind); err != nil {
+	if err := v.checkKind(ctx, adt.StringKind); err != nil {
 		return "", v.toErr(err)
 	}
-	return v.eval(ctx).(*stringLit).Str, nil
+	return v.eval(ctx).(*adt.String).Str, nil
 }
 
 // Bytes returns a byte slice if v represents a list of bytes or an error
@@ -1275,12 +1303,12 @@ func (v Value) Bytes() ([]byte, error) {
 	v, _ = v.Default()
 	ctx := v.ctx()
 	switch x := v.eval(ctx).(type) {
-	case *bytesLit:
+	case *adt.Bytes:
 		return append([]byte(nil), x.B...), nil
-	case *stringLit:
+	case *adt.String:
 		return []byte(x.Str), nil
 	}
-	return nil, v.toErr(v.checkKind(ctx, bytesKind|stringKind))
+	return nil, v.toErr(v.checkKind(ctx, adt.BytesKind|adt.StringKind))
 }
 
 // Reader returns a new Reader if v is a string or bytes type and an error
@@ -1289,12 +1317,12 @@ func (v Value) Reader() (io.Reader, error) {
 	v, _ = v.Default()
 	ctx := v.ctx()
 	switch x := v.eval(ctx).(type) {
-	case *bytesLit:
+	case *adt.Bytes:
 		return bytes.NewReader(x.B), nil
-	case *stringLit:
+	case *adt.String:
 		return strings.NewReader(x.Str), nil
 	}
-	return nil, v.toErr(v.checkKind(ctx, stringKind|bytesKind))
+	return nil, v.toErr(v.checkKind(ctx, adt.StringKind|adt.BytesKind))
 }
 
 // TODO: distinguish between optional, hidden, etc. Probably the best approach
@@ -1302,7 +1330,7 @@ func (v Value) Reader() (io.Reader, error) {
 // a structVal.
 
 // structVal returns an structVal or an error if v is not a struct.
-func (v Value) structValData(ctx *context) (structValue, *bottom) {
+func (v Value) structValData(ctx *context) (structValue, *adt.Bottom) {
 	return v.structValOpts(ctx, options{
 		omitHidden:      true,
 		omitDefinitions: true,
@@ -1310,12 +1338,12 @@ func (v Value) structValData(ctx *context) (structValue, *bottom) {
 	})
 }
 
-func (v Value) structValFull(ctx *context) (structValue, *bottom) {
+func (v Value) structValFull(ctx *context) (structValue, *adt.Bottom) {
 	return v.structValOpts(ctx, options{})
 }
 
 // structVal returns an structVal or an error if v is not a struct.
-func (v Value) structValOpts(ctx *context, o options) (structValue, *bottom) {
+func (v Value) structValOpts(ctx *context, o options) (structValue, *adt.Bottom) {
 	v, _ = v.Default()
 
 	obj, err := v.getStruct()
@@ -1365,9 +1393,9 @@ func (v Value) Struct() (*Struct, error) {
 	return &Struct{obj}, nil
 }
 
-func (v Value) getStruct() (*structLit, *bottom) {
+func (v Value) getStruct() (*adt.Vertex, *adt.Bottom) {
 	ctx := v.ctx()
-	if err := v.checkKind(ctx, structKind); err != nil {
+	if err := v.checkKind(ctx, adt.StructKind); err != nil {
 		if !err.ChildError {
 			return nil, err
 		}
@@ -1450,6 +1478,9 @@ func (v Value) Fields(opts ...Option) (*Iterator, error) {
 //
 // The Exists() method can be used to verify if the returned value existed.
 // Lookup cannot be used to look up hidden or optional fields or definitions.
+//
+// Deprecated: use LookupPath. At some point before v1.0.0, this method will
+// be removed to be reused eventually for looking up a selector.
 func (v Value) Lookup(path ...string) Value {
 	ctx := v.ctx()
 	for _, k := range path {
@@ -1463,6 +1494,57 @@ func (v Value) Lookup(path ...string) Value {
 		v = obj.Lookup(k)
 	}
 	return v
+}
+
+// Path returns the path to this value from the root of an Instance.
+//
+// This is currently only defined for values that have a fixed path within
+// a configuration, and thus not those that are derived from Elem, Template,
+// or programmatically generated values such as those returned by Unify.
+func (v Value) Path() Path {
+	if v.v == nil {
+		return Path{}
+	}
+	p := v.v.Path()
+	a := make([]Selector, len(p))
+	for i, f := range p {
+		switch f.Typ() {
+		case adt.IntLabel:
+			a[i] = Selector{indexSelector(f)}
+
+		case adt.DefinitionLabel, adt.HiddenDefinitionLabel, adt.HiddenLabel:
+			a[i] = Selector{definitionSelector(f.SelectorString(v.idx.Runtime))}
+
+		case adt.StringLabel:
+			a[i] = Selector{stringSelector(f.StringValue(v.idx.Runtime))}
+		}
+	}
+	return Path{path: a}
+}
+
+// LookupPath reports the value for path p relative to v.
+func (v Value) LookupPath(p Path) Value {
+	n := v.v
+outer:
+	for _, sel := range p.path {
+		f := sel.sel.feature(v.idx.Runtime)
+		for _, a := range n.Arcs {
+			if a.Label == f {
+				n = a
+				continue outer
+			}
+		}
+		var x *adt.Bottom
+		if err, ok := sel.sel.(pathError); ok {
+			x = &adt.Bottom{Err: err.Error}
+		} else {
+			// TODO: better message.
+			x = v.idx.mkErr(n, codeNotExist, "value %q not found", sel.sel)
+		}
+		v := makeValue(v.idx, n)
+		return newErrValue(v, x)
+	}
+	return makeValue(v.idx, n)
 }
 
 // LookupDef reports the definition with the given name within struct v. The
@@ -1557,13 +1639,10 @@ func (v Value) Fill(x interface{}, path ...string) Value {
 	var value = convert.GoValueToValue(ctx.opCtx, x, true)
 	n, _ := value.(*adt.Vertex)
 	if n == nil {
-		n = &adt.Vertex{Label: v.v.Label}
+		n = &adt.Vertex{}
 		n.AddConjunct(adt.MakeRootConjunct(nil, value))
-	} else {
-		n.Label = v.v.Label
 	}
 	n.Finalize(ctx.opCtx)
-	n.Parent = v.v.Parent
 	w := makeValue(v.idx, n)
 	return v.Unify(w)
 }
@@ -1639,8 +1718,9 @@ func (v Value) Subsume(w Value, opts ...Option) error {
 // Value v and w must be obtained from the same build.
 // TODO: remove this requirement.
 func (v Value) Subsumes(w Value) bool {
+	ctx := v.ctx().opCtx
 	p := subsume.Profile{Defaults: true}
-	return p.Check(v.ctx().opCtx, v.v, w.v)
+	return p.Check(ctx, v.v, w.v)
 }
 
 // Unify reports the greatest lower bound of v and w.
@@ -1648,23 +1728,21 @@ func (v Value) Subsumes(w Value) bool {
 // Value v and w must be obtained from the same build.
 // TODO: remove this requirement.
 func (v Value) Unify(w Value) Value {
-	// ctx := v.ctx()
 	if v.v == nil {
 		return w
 	}
 	if w.v == nil {
 		return v
 	}
-	n := &adt.Vertex{Label: v.v.Label}
-	n.AddConjunct(adt.MakeRootConjunct(nil, v.v))
-	n.AddConjunct(adt.MakeRootConjunct(nil, w.v))
+
+	n := &adt.Vertex{}
+
+	eval.AddVertex(n, v.v)
+	eval.AddVertex(n, w.v)
 
 	ctx := v.idx.newContext()
 	n.Finalize(ctx.opCtx)
 
-	// We do not set the parent until here as we don't want to "inherit" the
-	// closedness setting from v.
-	n.Parent = v.v.Parent
 	return makeValue(v.idx, n)
 }
 
@@ -1681,6 +1759,12 @@ func (v Value) UnifyAccept(w Value, accept Value) Value {
 		panic("accept must exist")
 	}
 
+	// TODO: take a similar approach for UnifyAccept as for Unify. In this
+	// case though, the fields should be added as an embeding.
+	//
+	// n := &adt.Vertex{}
+	// eval.EmbedVertex(n, v.v)
+	// eval.EmbedVertex(n, w.v)
 	n := &adt.Vertex{Parent: v.v.Parent, Label: v.v.Label}
 	n.AddConjunct(adt.MakeRootConjunct(nil, v.v))
 	n.AddConjunct(adt.MakeRootConjunct(nil, w.v))
@@ -1701,8 +1785,7 @@ func (v Value) Equals(other Value) bool {
 	if v.v == nil || other.v == nil {
 		return false
 	}
-	return eval.Equal(v.ctx().opCtx, v.v, other.v)
-
+	return adt.Equal(v.ctx().opCtx, v.v, other.v)
 }
 
 // Format prints a debug version of a value.
@@ -1718,7 +1801,7 @@ func (v Value) Format(state fmt.State, verb rune) {
 	case state.Flag('+'):
 		_, _ = io.WriteString(state, ctx.opCtx.Str(v.v))
 	default:
-		n, _ := export.Raw.Expr(v.idx.Runtime, v.v)
+		n, _ := export.Raw.Expr(v.idx.Runtime, v.instance().ID(), v.v)
 		b, _ := format.Node(n)
 		_, _ = state.Write(b)
 	}
@@ -1751,10 +1834,17 @@ func reference(c *context, env *adt.Environment, r adt.Expr) (inst *Instance, pa
 	defer ctx.PopState(ctx.PushState(env, r.Source()))
 
 	switch x := r.(type) {
+	// TODO: do we need to handle Vertex as well, in case this is hard-wired?
+	// Probably not, as this results from dynamic content.
+
+	case *adt.NodeLink:
+		// TODO: consider getting rid of NodeLink.
+		inst, path = mkPath(c, nil, x.Node)
+
 	case *adt.FieldReference:
 		env := ctx.Env(x.UpCount)
 		inst, path = mkPath(c, nil, env.Vertex)
-		path = append(path, x.Label.SelectorString(c.Index))
+		path = append(path, x.Label.SelectorString(c.Runtime))
 
 	case *adt.LabelReference:
 		env := ctx.Env(x.UpCount)
@@ -2074,25 +2164,15 @@ func (v Value) Expr() (Op, []Value) {
 	var env *adt.Environment
 
 	if v.v.IsData() {
-		switch x := v.v.Value.(type) {
-		case *adt.ListMarker, *adt.StructMarker:
-			expr = v.v
-		default:
-			expr = x
-		}
+		expr = v.v.Value()
 
 	} else {
 		switch len(v.v.Conjuncts) {
 		case 0:
-			if v.v.Value == nil {
+			if v.v.BaseValue == nil {
 				return NoOp, []Value{makeValue(v.idx, v.v)}
 			}
-			switch x := v.v.Value.(type) {
-			case *adt.ListMarker, *adt.StructMarker:
-				expr = v.v
-			default:
-				expr = x
-			}
+			expr = v.v.Value()
 
 		case 1:
 			// the default case, processed below.
@@ -2125,17 +2205,17 @@ func (v Value) Expr() (Op, []Value) {
 	a := []Value{}
 	op := NoOp
 	switch x := expr.(type) {
-	case *binaryExpr:
+	case *adt.BinaryExpr:
 		a = append(a, remakeValue(v, env, x.X))
 		a = append(a, remakeValue(v, env, x.Y))
 		op = x.Op
-	case *unaryExpr:
+	case *adt.UnaryExpr:
 		a = append(a, remakeValue(v, env, x.X))
 		op = x.Op
-	case *boundExpr:
+	case *adt.BoundExpr:
 		a = append(a, remakeValue(v, env, x.Expr))
 		op = x.Op
-	case *boundValue:
+	case *adt.BoundValue:
 		a = append(a, remakeValue(v, env, x.Value))
 		op = x.Op
 	case *adt.Conjunction:
@@ -2194,7 +2274,7 @@ func (v Value) Expr() (Op, []Value) {
 			op = adt.OrOp
 		}
 
-	case *interpolation:
+	case *adt.Interpolation:
 		for _, p := range x.Parts {
 			a = append(a, remakeValue(v, env, p))
 		}
@@ -2210,30 +2290,30 @@ func (v Value) Expr() (Op, []Value) {
 		_ = ctx.PopState(f)
 		op = SelectorOp
 
-	case *selectorExpr:
+	case *adt.SelectorExpr:
 		a = append(a, remakeValue(v, env, x.X))
 		// A string selector is quoted.
 		a = append(a, remakeValue(v, env, &adt.String{
-			Str: x.Sel.SelectorString(v.idx.Index),
+			Str: x.Sel.SelectorString(v.idx.Runtime),
 		}))
 		op = SelectorOp
 
-	case *indexExpr:
+	case *adt.IndexExpr:
 		a = append(a, remakeValue(v, env, x.X))
 		a = append(a, remakeValue(v, env, x.Index))
 		op = IndexOp
-	case *sliceExpr:
+	case *adt.SliceExpr:
 		a = append(a, remakeValue(v, env, x.X))
 		a = append(a, remakeValue(v, env, x.Lo))
 		a = append(a, remakeValue(v, env, x.Hi))
 		op = SliceOp
-	case *callExpr:
+	case *adt.CallExpr:
 		a = append(a, remakeValue(v, env, x.Fun))
 		for _, arg := range x.Args {
 			a = append(a, remakeValue(v, env, arg))
 		}
 		op = CallOp
-	case *customValidator:
+	case *adt.BuiltinValidator:
 		a = append(a, remakeValue(v, env, x.Builtin))
 		for _, arg := range x.Args {
 			a = append(a, remakeValue(v, env, arg))

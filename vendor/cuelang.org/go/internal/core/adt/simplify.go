@@ -82,17 +82,17 @@ func SimplifyBounds(ctx *OpContext, k Kind, x, y *BoundValue) Value {
 			// Readjust bounds for integers.
 			if x.Op == GreaterEqualOp {
 				// >=3.4  ==>  >=4
-				_, _ = apd.BaseContext.Ceil(&lo, &a.X)
+				_, _ = apdCtx.Ceil(&lo, &a.X)
 			} else {
 				// >3.4  ==>  >3
-				_, _ = apd.BaseContext.Floor(&lo, &a.X)
+				_, _ = apdCtx.Floor(&lo, &a.X)
 			}
 			if y.Op == LessEqualOp {
 				// <=2.3  ==>  <= 2
-				_, _ = apd.BaseContext.Floor(&hi, &b.X)
+				_, _ = apdCtx.Floor(&hi, &b.X)
 			} else {
 				// <2.3   ==>  < 3
-				_, _ = apd.BaseContext.Ceil(&hi, &b.X)
+				_, _ = apdCtx.Ceil(&hi, &b.X)
 			}
 		}
 
@@ -204,24 +204,8 @@ func test(ctx *OpContext, op Op, a, b Value) bool {
 // now.
 func SimplifyValidator(ctx *OpContext, v, w Validator) Validator {
 	switch x := v.(type) {
-	case *Builtin:
-		switch y := w.(type) {
-		case *Builtin:
-			if x == y {
-				return x
-			}
-
-		case *BuiltinValidator:
-			if y.Builtin == x && len(y.Args) == 0 {
-				return x
-			}
-		}
-
 	case *BuiltinValidator:
 		switch y := w.(type) {
-		case *Builtin:
-			return SimplifyValidator(ctx, y, x)
-
 		case *BuiltinValidator:
 			if x == y {
 				return x
@@ -230,7 +214,7 @@ func SimplifyValidator(ctx *OpContext, v, w Validator) Validator {
 				return nil
 			}
 			for i, a := range x.Args {
-				if !test(ctx, EqualOp, a, y.Args[i]) {
+				if !Equal(ctx, a, y.Args[i]) {
 					return nil
 				}
 			}

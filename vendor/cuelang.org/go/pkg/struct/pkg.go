@@ -18,18 +18,24 @@ var _ = adt.TopKind // in case the adt package isn't used
 
 var pkg = &internal.Package{
 	Native: []*internal.Builtin{{
-		Name:   "MinFields",
-		Params: []adt.Kind{adt.StructKind, adt.IntKind},
-		Result: adt.BoolKind,
+		Name: "MinFields",
+		Params: []internal.Param{
+			{Kind: adt.StructKind},
+			{Kind: adt.IntKind},
+		},
+		Result: adt.BottomKind,
 		Func: func(c *internal.CallCtxt) {
 			object, n := c.Struct(0), c.Int(1)
 			if c.Do() {
-				c.Ret, c.Err = MinFields(object, n)
+				c.Ret = MinFields(object, n)
 			}
 		},
 	}, {
-		Name:   "MaxFields",
-		Params: []adt.Kind{adt.StructKind, adt.IntKind},
+		Name: "MaxFields",
+		Params: []internal.Param{
+			{Kind: adt.StructKind},
+			{Kind: adt.IntKind},
+		},
 		Result: adt.BoolKind,
 		Func: func(c *internal.CallCtxt) {
 			object, n := c.Struct(0), c.Int(1)

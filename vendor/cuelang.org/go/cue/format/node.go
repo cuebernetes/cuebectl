@@ -386,7 +386,6 @@ func (f *formatter) decl(decl ast.Decl) {
 		f.print(n.At, n)
 
 	case *ast.CommentGroup:
-		f.print(newsection)
 		f.printComment(n)
 		f.print(newsection)
 
@@ -532,7 +531,7 @@ func (f *formatter) exprRaw(expr ast.Expr, prec1, depth int) {
 
 	switch x := expr.(type) {
 	case *ast.BadExpr:
-		f.print(x.From, "BadExpr")
+		f.print(x.From, "_|_")
 
 	case *ast.BottomLit:
 		f.print(x.Bottom, token.BOTTOM)
@@ -713,6 +712,14 @@ func (f *formatter) clause(clause ast.Clause) {
 		f.print(n.If, "if", blank)
 		f.print(indent)
 		f.expr(n.Condition)
+		f.markUnindentLine()
+
+	case *ast.LetClause:
+		f.print(n.Let, token.LET, blank, nooverride)
+		f.print(indent)
+		f.expr(n.Ident)
+		f.print(blank, nooverride, n.Equal, token.BIND, blank)
+		f.expr(n.Expr)
 		f.markUnindentLine()
 
 	default:
