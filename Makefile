@@ -18,5 +18,5 @@ kubectl-plugin: check
 
 .PHONY: install-kubectl
 install-kubectl: kubectl-plugin
-	mv ./kubectl-cue /usr/local/bin/kubectl-cue
+	mv ./bin/kubectl-cue /usr/local/bin/kubectl-cue
 
