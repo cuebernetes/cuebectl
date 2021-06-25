@@ -8,7 +8,7 @@ import (
 	"strings"
 	"sync"
 
-	"cuelang.org/go/cue/build"
+	"cuelang.org/go/cue"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/client-go/dynamic"
@@ -40,13 +40,13 @@ type CueInstanceController struct {
 	resourceVersions       *lastResourceVersions
 }
 
-func NewCueInstanceController(client dynamic.Interface, mapper meta.RESTMapper, buildInstance *build.Instance) *CueInstanceController {
+func NewCueInstanceController(client dynamic.Interface, mapper meta.RESTMapper, runtime *cue.Runtime, instance *cue.Instance) *CueInstanceController {
 	informerCache := cache.NewDynamicInformerCache(client)
 	return &CueInstanceController{
 		clusterQueue:     workqueue.NewRateLimitingQueue(workqueue.DefaultControllerRateLimiter()),
 		cueQueue:         workqueue.NewRateLimitingQueue(workqueue.DefaultItemBasedRateLimiter()),
 		tracker:          tracker.NewLocationTracker(ensure.NewDynamicUnstructuredEnsurer(client, mapper, informerCache)),
-		unifier:          unifier.NewClusterUnifier(buildInstance, informerCache),
+		unifier:          unifier.NewClusterUnifier(runtime, instance, informerCache),
 		informerCache:    informerCache,
 		resourceVersions: NewLastResourceVersions(),
 	}

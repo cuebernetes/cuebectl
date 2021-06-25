@@ -9,7 +9,6 @@ import (
 	"sync"
 
 	"cuelang.org/go/cue"
-	"cuelang.org/go/cue/build"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/client-go/util/workqueue"
 
@@ -21,16 +20,16 @@ import (
 // with the current state of the cluster.
 type ClusterUnifier struct {
 	runtime     *cue.Runtime
-	instance    *build.Instance
+	instance    *cue.Instance
 	informerSet cache.Interface
 
 	// protects access to the build.Instance being unified
 	sync.RWMutex
 }
 
-func NewClusterUnifier(instance *build.Instance, informerSet cache.Interface) *ClusterUnifier {
+func NewClusterUnifier(runtime *cue.Runtime, instance *cue.Instance, informerSet cache.Interface) *ClusterUnifier {
 	return &ClusterUnifier{
-		runtime:     &cue.Runtime{},
+		runtime:     runtime,
 		instance:    instance,
 		informerSet: informerSet,
 	}
@@ -41,11 +40,8 @@ func NewClusterUnifier(instance *build.Instance, informerSet cache.Interface) *C
 func (u *ClusterUnifier) unify(fromCluster map[*identity.Locator]*unstructured.Unstructured) (instance *cue.Instance, err error) {
 	u.Lock()
 	defer u.Unlock()
-
-	instance, err = u.runtime.Build(u.instance)
-	if err != nil {
-		return
-	}
+	i := *u.instance
+	instance = &i
 	for l, o := range fromCluster {
 		if instance, err = instance.Fill(o, l.Path...); err != nil {
 			return
@@ -55,11 +51,7 @@ func (u *ClusterUnifier) unify(fromCluster map[*identity.Locator]*unstructured.U
 }
 
 func (u *ClusterUnifier) Fill(queue workqueue.RateLimitingInterface) (total int, err error) {
-	instance, err := u.runtime.Build(u.instance)
-	if err != nil {
-		return
-	}
-
+	instance := *u.instance
 	itr, err := instance.Value().Fields()
 	if err != nil {
 		return

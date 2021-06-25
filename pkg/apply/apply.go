@@ -10,6 +10,8 @@ import (
 	"strings"
 
 	"cuelang.org/go/cue/load"
+	"cuelang.org/go/cue"
+
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/client-go/dynamic"
 
@@ -26,7 +28,16 @@ func CueDir(ctx context.Context, out io.Writer, client dynamic.Interface, mapper
 	if len(is) < 1 {
 		return nil, fmt.Errorf("no instances found")
 	}
-	cueInstanceController := controller.NewCueInstanceController(client, mapper, is[0])
+	r := cue.Runtime{}
+	instance, err := r.Build(is[0])
+	if err != nil {
+		return nil, err
+	}
+	return CueInstance(ctx, out, client, mapper, &r, instance, watch)
+}
+
+func CueInstance(ctx context.Context, out io.Writer, client dynamic.Interface, mapper meta.RESTMapper, runtime *cue.Runtime, instance *cue.Instance, watch bool) (*controller.ClusterState, error) {
+	cueInstanceController := controller.NewCueInstanceController(client, mapper, runtime, instance)
 	stateChan := make(chan controller.ClusterState)
 	errChan := make(chan error)
 
